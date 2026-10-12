@@ -33,6 +33,9 @@ async def _relay(reader, writer, pool, host, port, first=b"", ok=b""):
         except OSError:
             pool.closed(iface)
             failed.add(iface.name)
+        except BaseException:  # bad hostname (UnicodeError), cancelled handler, ...: never leave the slot reserved
+            pool.closed(iface)
+            raise
     try:
         if ok:
             writer.write(ok)

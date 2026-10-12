@@ -18,11 +18,10 @@ def bar(frac, width=36):
 
 async def measure(pool, names, url=URL, secs=10.0):
     """Mbit/s per network while only `names` are enabled. Restores the pool afterwards."""
-    saved = pool.enabled
-    pool.enabled = set(names)
+    view = pool.restricted(set(names))  # the real selection (and live proxy traffic) is left alone
     tmp = tempfile.mkdtemp(prefix="maxnet-bench-")  # private 0700 dir, unpredictable name
     out = f"{tmp}/bench.bin"
-    task = asyncio.create_task(download(url, out, pool))
+    task = asyncio.create_task(download(url, out, view))
     try:
         await asyncio.wait({task}, timeout=WARMUP)
         before = {n: pool.bytes.get(n, 0) for n in names}
@@ -36,7 +35,6 @@ async def measure(pool, names, url=URL, secs=10.0):
         task.cancel()
         with contextlib.suppress(BaseException):
             await task
-        pool.enabled = saved
         shutil.rmtree(tmp, ignore_errors=True)
 
 

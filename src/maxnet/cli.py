@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import sys
 
-from .net import Pool, list_interfaces
+from .net import DEFAULT_PORT, Pool, list_interfaces
 
 
 def _names():
@@ -19,9 +19,9 @@ def _set(name, on):
 
 
 def _dl(url, out):
-    from .download import safe_filename
+    from .download import safe_filename, unique_path
     pool = Pool()
-    out = out or safe_filename(url)
+    out = str(unique_path(out or safe_filename(url)))
     done = [0]
 
     def progress(n):
@@ -41,7 +41,7 @@ async def _timed(url, out, pool, progress):
 
 def _apps(a):
     from . import apps
-    port = 1080
+    port = DEFAULT_PORT
     if a.cmd == "env":
         print(apps.env_exports(port))
     elif a.cmd == "apps":
@@ -97,7 +97,7 @@ def main():
     sub.add_parser("add", help="add an interface to the pool").add_argument("name")
     sub.add_parser("remove", help="remove an interface from the pool").add_argument("name")
     pr = sub.add_parser("proxy", help="run the proxy without the TUI")
-    pr.add_argument("--port", type=int, default=1080)
+    pr.add_argument("--port", type=int, default=DEFAULT_PORT)
     d = sub.add_parser("dl", help="download one file over all enabled networks")
     d.add_argument("url")
     d.add_argument("-o", "--output")
@@ -129,7 +129,10 @@ def main():
     elif a.cmd == "system":
         from . import sysproxy
         if a.state == "on":
-            print("system proxy on" if sysproxy.enable(1080) else "macOS only")
+            from . import apps
+            if not apps.proxy_up(DEFAULT_PORT):  # pointing the system at a dead proxy would cut every app's internet
+                sys.exit(f"No maxnet proxy is listening on :{DEFAULT_PORT}. Run `maxnet` first (it turns the system proxy on by itself).")
+            print("system proxy on" if sysproxy.enable(DEFAULT_PORT) else "macOS only")
         elif a.state == "off":
             print("restored your original proxy settings" if sysproxy.disable() else "nothing to restore")
         else:

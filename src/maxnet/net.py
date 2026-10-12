@@ -1,5 +1,7 @@
 """Interfaces, the pool that picks one per connection, and sockets pinned to an interface."""
 import asyncio
+import contextlib
+import fcntl
 import json
 import math
 import os
@@ -13,6 +15,7 @@ import psutil
 
 CONFIG = Path(os.environ.get("MAXNET_CONFIG", Path.home() / ".config" / "maxnet" / "config.json"))
 IP_BOUND_IF = 25  # macOS: force egress interface, no root needed
+DEFAULT_PORT = 1080  # the local proxy port, shared by the TUI, the CLI and app launching
 
 
 @dataclass(frozen=True)
@@ -30,7 +33,8 @@ def list_interfaces():
     out = []
     for name, addrs in psutil.net_if_addrs().items():
         ip = next((a.address for a in addrs if a.family == socket.AF_INET), None)
-        if not ip or ip.startswith(("127.", "169.254.")) or not stats[name].isup or name.startswith(VIRTUAL):
+        st = stats.get(name)  # an interface can vanish between the two snapshots (cable pulled)
+        if not ip or st is None or ip.startswith(("127.", "169.254.")) or not st.isup or name.startswith(VIRTUAL):
             continue
         out.append(Iface(name, ip))
     return sorted(out, key=lambda i: i.name)
@@ -43,9 +47,21 @@ def load_config():
         return {}
 
 
-def update_config(**kw):
+@contextlib.contextmanager
+def _locked():
+    """One writer at a time across processes (the TUI and CLI commands share this file)."""
     CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG.write_text(json.dumps({**load_config(), **kw}))
+    with open(CONFIG.parent / (CONFIG.name + ".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def update_config(**kw):
+    """Read-modify-write under a lock, replacing the file atomically: it holds the only copy of the user's original proxy settings."""
+    with _locked():
+        tmp = CONFIG.with_name(CONFIG.name + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({**load_config(), **kw}))
+        os.replace(tmp, CONFIG)
 
 
 def load_enabled():
@@ -80,6 +96,12 @@ class Pool:
 
     def live(self):
         return [i for i in self.lister() if i.name in self.enabled]
+
+    def restricted(self, names):
+        """A view that only uses `names` but shares this pool's counters. Never touches the real selection or the config file."""
+        view = Pool(enabled=names, lister=self.lister)
+        view.active, view.bytes, view._ewma, view._peak = self.active, self.bytes, self._ewma, self._peak
+        return view
 
     def toggle(self, name):
         self.enabled = self.enabled ^ {name}

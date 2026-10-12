@@ -1,3 +1,4 @@
+import asyncio
 import os
 import signal
 import time
@@ -11,12 +12,12 @@ from textual.widgets.option_list import Option
 from . import apps, netsetup, sysproxy
 from .bench import bar, run_all, slow_warnings
 from .check import run_checks
-from .download import download, safe_filename
+from .download import download, safe_filename, unique_path
 from .meta import Meta, mask_ip, probe_all, shared_lines
-from .net import Pool, list_interfaces
+from .net import DEFAULT_PORT, Pool, list_interfaces
 from .proxy import serve
 
-PORT = 1080
+PORT = DEFAULT_PORT
 BAR = 30
 ACCENT = "#d19a66"
 HELP = {
@@ -53,6 +54,9 @@ class MaxNet(App):
         self.show_ip = False
         self.proxy_ok = False
         self.auto_paused = False  # True while we turned ourselves OFF because every network disconnected
+        self.owns_system_proxy = False  # only the instance that turned it ON may turn it OFF
+        self._guard_busy = False
+        self.unconfigured = []
         self.pending = None
         self.results = []
         self.metas, self.tests = {}, {}
@@ -71,7 +75,7 @@ class MaxNet(App):
             await serve(self.pool, port=PORT)
             self.proxy_ok = True
             if self.system_proxy and self.pool.live():
-                sysproxy.enable(PORT)  # restored when you quit
+                self.owns_system_proxy = await asyncio.to_thread(sysproxy.enable, PORT)  # restored when you quit
         except OSError:
             self.say(f"Port {PORT} is already in use (is another maxnet open?). Dashboard works, but nothing is routed.", "red")
         self.set_interval(1, self.tick)
@@ -88,7 +92,11 @@ class MaxNet(App):
         self.run_worker(self.meta_worker(), group="meta", exclusive=True)
 
     async def meta_worker(self):
+        found = await asyncio.to_thread(netsetup.unconfigured)  # shells out to networksetup: never per tick
+        changed, self.unconfigured = found != self.unconfigured, found
         self.metas = await probe_all(list_interfaces())
+        if changed and self.mode == "menu":
+            self.show_menu()  # the menu must offer "Set up new network port" whenever the notice says so
 
     def tick(self):
         now = time.monotonic()
@@ -131,7 +139,7 @@ class MaxNet(App):
             out.append("  " + self.detail(i, m) + "\n", style="dim")
         for g in shared_lines(self.pool.enabled, self.metas):
             out.append(f"\nNote: {' and '.join(g)} share one internet line (same public IP). The gain depends on your router, so try the speed test.\n", style="#e5c07b")
-        new = netsetup.unconfigured()
+        new = self.unconfigured
         if new:
             out.append(f"\nFound a network port macOS has not set up ({', '.join(new)}). Choose 'Set up new network port' in the menu.\n", style="#e5c07b")
         if not ifaces:
@@ -142,16 +150,31 @@ class MaxNet(App):
 
     def guard_system_proxy(self, live):
         """Never leave the Mac pointing at a proxy with no network behind it."""
-        if not (self.system_proxy and self.proxy_ok):
+        if not (self.system_proxy and self.proxy_ok) or self._guard_busy:
             return
         if not live and sysproxy.active():
-            sysproxy.disable()
-            self.auto_paused = True
-            self.say("All selected networks disconnected. Turned OFF so your Mac keeps its normal connection.", "bold #e5c07b")
+            action = "pause"
         elif live and self.auto_paused:
-            self.auto_paused = False  # only resume what we paused; a manual OFF stays OFF
-            if sysproxy.enable(PORT):
-                self.say("A network is back. Turned ON again.", "bold green")
+            action = "resume"
+        else:
+            return
+        self._guard_busy = True
+        self.run_worker(self._guard(action), group="guard")
+
+    async def _guard(self, action):
+        try:
+            if action == "pause":
+                await asyncio.to_thread(sysproxy.disable)  # networksetup is slow: keep it off the proxy's event loop
+                self.auto_paused = True
+                self.owns_system_proxy = False
+                self.say("All selected networks disconnected. Turned OFF so your Mac keeps its normal connection.", "bold #e5c07b")
+            else:
+                self.auto_paused = False  # only resume what we paused; a manual OFF stays OFF
+                if await asyncio.to_thread(sysproxy.enable, PORT):
+                    self.owns_system_proxy = True
+                    self.say("A network is back. Turned ON again.", "bold green")
+        finally:
+            self._guard_busy = False
 
     def detail(self, i, m):
         if m.reachable is None:
@@ -180,7 +203,7 @@ class MaxNet(App):
 
     def show_menu(self):
         sysword = "Turn OFF (back to your normal connection)" if sysproxy.active() else "Turn ON"
-        new = netsetup.unconfigured()
+        new = self.unconfigured
         extra = [("setup", f"Set up {len(new)} new network port{'s' if len(new) != 1 else ''} (phone just plugged in?)")] if new else []
         self.fill("menu", extra + [
             ("check", "Check that everything works"),
@@ -235,7 +258,7 @@ class MaxNet(App):
                     "sys": self.toggle_sys, "quit": self.action_ask_quit}[key]()
         if self.mode == "setup":
             self.pending = ("setup", key)
-            return self.fill("confirm", [("yes", f"Yes: create a macOS network service for {key} (changes Network settings)"), ("back", "← Cancel")])
+            return self.fill("confirm", [("back", "← Cancel"), ("yes", f"Yes: set up {key} (changes your macOS Network settings)")])  # the safe choice is pre-selected
         if self.mode == "confirm":
             kind, arg = self.pending
             if key == "yes" and kind == "setup":
@@ -252,7 +275,7 @@ class MaxNet(App):
             if key == "launch":
                 names = apps.attached()
                 self.pending = ("launch", names)
-                return self.fill("confirm", [("yes", f"Yes: start {len(names)} app{'s' if len(names) != 1 else ''} through maxnet now"), ("back", "← Cancel")])
+                return self.fill("confirm", [("back", "← Cancel"), ("yes", f"Yes: start {len(names)} app{'s' if len(names) != 1 else ''} through maxnet now")])  # the safe choice is pre-selected
             apps.toggle(key)
             return self.show_apps()
         if self.mode == "quit":
@@ -265,8 +288,10 @@ class MaxNet(App):
         self.auto_paused = False
         if sysproxy.active():
             sysproxy.disable()
+            self.owns_system_proxy = False
             self.say("Turned OFF. Your original proxy settings are restored.")
         elif self.proxy_ok and sysproxy.enable(PORT):
+            self.owns_system_proxy = True
             self.say("Turned ON. Apps that follow macOS proxy settings now use all your networks.")
         else:
             self.say("Can't turn it on here (needs macOS and a running proxy).", "red")
@@ -343,9 +368,7 @@ class MaxNet(App):
 
     async def dl_worker(self, url):
         name = safe_filename(url)
-        dest, n = Path.home() / "Downloads" / name, 1
-        while dest.exists():
-            dest, n = dest.with_name(f"{Path(name).stem} ({n}){Path(name).suffix}"), n + 1
+        dest = unique_path(Path.home() / "Downloads" / name)
         done = [0]
 
         def progress(k):
@@ -373,18 +396,35 @@ class MaxNet(App):
         self.fill("quit", [("yes", "Turn OFF and quit"), ("no", "← Stay")])
 
 
-def run(system_proxy=True):
-    def bye(signum, _frame):  # terminal window closed (SIGHUP) or process terminated (SIGTERM): restore settings first
-        sysproxy.disable()
-        try:  # leave the user's terminal usable: normal screen, cursor back, mouse reporting off
-            os.set_blocking(1, False)  # never let a wedged terminal trap the exit
-            os.write(1, b"\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[0m")
+def reset_terminal(fd=1):
+    """Normal screen, cursor back, mouse reporting off. Never blocks, and leaves the (shared) terminal exactly as blocking as it was."""
+    was_blocking = os.get_blocking(fd)
+    try:
+        os.set_blocking(fd, False)  # a wedged terminal must not trap the exit
+        os.write(fd, b"\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[0m")
+    except OSError:
+        pass  # the terminal is already gone (SIGHUP), or its buffer is full
+    finally:
+        try:
+            os.set_blocking(fd, was_blocking)  # O_NONBLOCK is shared with the user's shell: restore it
         except OSError:
-            pass  # the terminal is already gone (SIGHUP)
+            pass
+
+
+def run(system_proxy=True):
+    app = MaxNet(system_proxy)
+
+    def restore():
+        if app.owns_system_proxy:  # a second maxnet that never turned it ON must not undo the first one's settings
+            sysproxy.disable()
+
+    def bye(signum, _frame):  # terminal window closed (SIGHUP) or process terminated (SIGTERM): restore settings first
+        restore()
+        reset_terminal()
         os._exit(128 + signum)  # exiting by exception can be swallowed by the running event loop, so exit for certain
     for sig in (signal.SIGHUP, signal.SIGTERM):
         signal.signal(sig, bye)
     try:
-        MaxNet(system_proxy).run()
+        app.run()
     finally:
-        sysproxy.disable()  # also covers Ctrl+C / errors; after a hard kill (SIGKILL) run `maxnet system off`
+        restore()  # also covers Ctrl+C / errors; after a hard kill (SIGKILL) run `maxnet system off`

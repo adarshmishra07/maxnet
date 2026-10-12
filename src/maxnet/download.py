@@ -1,7 +1,9 @@
 """Plexo-style downloader: one file, split into Range blocks, fetched over every enabled interface."""
 import asyncio
+import contextlib
 import os
 import ssl as ssllib
+from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 
 import truststore  # OS trust store, so corporate/WARP-style certificates validate like in curl
@@ -12,6 +14,16 @@ BLOCK = 8 * 1024 * 1024      # largest block
 MIN_BLOCK = 1024 * 1024      # smallest block; small files get small blocks so every stream has work
 STREAMS_PER_IFACE = 16
 STALL = 15.0  # seconds without any data before a stream gives up and its block goes to another network
+
+
+def unique_path(path):
+    """`path`, or `name (1).ext`, `name (2).ext`... so an existing file is never overwritten."""
+    path = Path(path)
+    n = 1
+    while path.exists():
+        path = path.with_name(f"{Path(path.name).stem.rsplit(' (', 1)[0] if n > 1 else path.stem} ({n}){path.suffix}")
+        n += 1
+    return path
 
 
 def safe_filename(url):
@@ -118,6 +130,8 @@ MAX_FAILS = 3   # a network that fails this many blocks in a row is retired; the
 SLOW_AFTER = 2.0       # seconds before judging speeds (streams need time to ramp up)
 SLOW_RATIO = 0.10      # a network below 10% of the best one's speed is retired for this download
 SLOW_MIN_BEST = 1_000_000  # bytes/s (8 Mbit/s): below this everything is slow, so there is nothing to compare
+SLOW_SAMPLES = 3       # consecutive low readings before a network is retired (one noisy reading must not do it)
+MONITOR_EVERY = 1.0    # seconds between readings
 
 
 async def _probe_all(ifaces, url):
@@ -186,18 +200,23 @@ async def download(url, out, pool, progress=lambda n: None, block=None, streams=
                     inflight[0] -= 1
 
         async def monitor():
-            """A network far slower than the best one (throttled, weak signal) only holds blocks back: retire it."""
+            """A network far slower than the best one (throttled, weak signal) only holds blocks back: retire it.
+            Only networks that are working on a block are judged, and only after several low readings in a row."""
+            low = {i.name: 0 for i in ifaces}
             await asyncio.sleep(SLOW_AFTER)
             while queue.qsize() or inflight[0]:
-                rates = {i.name: pool.rate(i.name) for i in ifaces if any(not t.done() for t in tasks[i.name])}
-                best = max(rates.values(), default=0.0)
-                if best >= SLOW_MIN_BEST:
-                    for name, r in rates.items():
-                        if r < SLOW_RATIO * best:
-                            note(f"{name}: much slower than the others ({r * 8 / 1e6:.0f} Mbit/s), stopped using it for this download")
-                            for t in tasks[name]:
-                                t.cancel()
-                await asyncio.sleep(1.0)
+                busy = {i.name: pool.rate(i.name) for i in ifaces if pool.active.get(i.name, 0) > 0 and any(not t.done() for t in tasks[i.name])}
+                best = max((pool.peak(i.name) for i in ifaces), default=0.0)  # best speed any network recently showed, even if it is idle now
+                for name in low:
+                    if name in busy and best >= SLOW_MIN_BEST and busy[name] < SLOW_RATIO * best:
+                        low[name] += 1
+                    else:
+                        low[name] = 0
+                    if low[name] == SLOW_SAMPLES:
+                        note(f"{name}: much slower than the others ({busy[name] * 8 / 1e6:.0f} Mbit/s), stopped using it for this download")
+                        for t in tasks[name]:
+                            t.cancel()
+                await asyncio.sleep(MONITOR_EVERY)
 
         # round-robin across networks, so the first blocks are spread out instead of all taken by the first network
         workers = []
@@ -216,7 +235,11 @@ async def download(url, out, pool, progress=lambda n: None, block=None, streams=
             raise errors[0]
         if not queue.empty():
             raise RuntimeError("download incomplete: every network gave up on the remaining blocks")
-    finally:
+    except BaseException:
         os.close(fd)
+        with contextlib.suppress(OSError):
+            os.remove(part)  # do not leave a huge half-written file behind
+        raise
+    os.close(fd)
     os.replace(part, out)
     return total

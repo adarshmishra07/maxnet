@@ -58,7 +58,10 @@ def launch(name, port):
         return f"{name}: proxy is not running on :{port}. Start `maxnet` first"
     if running(name):
         return f"{name}: already running. Quit it, then launch again so it picks up the proxy"
-    subprocess.run(["open", "-na", name, "--args", f"--proxy-server=socks5://127.0.0.1:{port}"], check=True)
+    try:
+        subprocess.run(["open", "-na", name, "--args", f"--proxy-server=socks5://127.0.0.1:{port}"], check=True, capture_output=True)
+    except (subprocess.CalledProcessError, OSError) as e:
+        return f"{name}: could not start ({e})"
     return f"{name}: launched through maxnet"
 
 

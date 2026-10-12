@@ -479,6 +479,7 @@ def test_download_stops_using_a_network_that_is_far_slower_than_the_best(server,
     import maxnet.download as dl
     real = dl.open_via
     monkeypatch.setattr(dl, "SLOW_AFTER", 0.3)
+    monkeypatch.setattr(dl, "MONITOR_EVERY", 0.1)
     monkeypatch.setattr(dl, "SLOW_MIN_BEST", 1000)   # loopback bursts are short; real networks are sustained
 
     class SlowReader:
@@ -503,3 +504,216 @@ def test_download_stops_using_a_network_that_is_far_slower_than_the_best(server,
     assert took < 2.5, took                                # without the monitor this takes ~4+ s
     assert p.bytes.get("slow", 0) < 500_000, p.bytes       # the slow network ends up carrying little
     assert any("slow" in n and "much slower" in n for n in notes), notes
+
+
+# ---------- regression tests for the code review findings ----------
+
+def test_list_interfaces_survives_an_interface_vanishing_between_snapshots(monkeypatch):
+    """Finding 1: unplugging a phone between psutil's two snapshots used to raise KeyError and crash the TUI."""
+    import maxnet.net as net
+    from collections import namedtuple
+    A, S = namedtuple("A", "family address"), namedtuple("S", "isup")
+    monkeypatch.setattr(net.psutil, "net_if_addrs", lambda: {"en0": [A(socket.AF_INET, "192.168.1.5")], "en11": [A(socket.AF_INET, "172.20.10.4")]})
+    monkeypatch.setattr(net.psutil, "net_if_stats", lambda: {"en0": S(True)})  # en11 vanished
+    assert [i.name for i in net.list_interfaces()] == ["en0"]
+
+
+def test_reset_terminal_never_blocks_and_restores_the_blocking_flag():
+    """Finding 2: the exit handler left the shared terminal non-blocking, which breaks the user's shell."""
+    from maxnet.tui import reset_terminal
+    r, w = os.pipe()
+    assert os.get_blocking(w) is True
+    reset_terminal(w)
+    assert os.get_blocking(w) is True and b"\x1b[?1049l" in os.read(r, 100)
+    os.set_blocking(w, False)                       # now fill the pipe so a normal write would block forever
+    try:
+        while True:
+            os.write(w, b"x" * 65536)
+    except BlockingIOError:
+        pass
+    os.set_blocking(w, True)
+    reset_terminal(w)                               # must return instead of hanging
+    assert os.get_blocking(w) is True
+
+
+def test_system_on_refuses_when_no_proxy_is_listening(monkeypatch):
+    """Finding 3: `maxnet system on` used to point every app at a dead proxy and cut their internet."""
+    import maxnet.apps as apps, maxnet.cli as cli, maxnet.sysproxy as sp
+    monkeypatch.setattr(apps, "proxy_up", lambda port: False)
+    monkeypatch.setattr(sp, "enable", lambda port: pytest.fail("must not change system settings"))
+    monkeypatch.setattr(sys, "argv", ["maxnet", "system", "on"])
+    with pytest.raises(SystemExit) as e:
+        cli.main()
+    assert "No maxnet proxy is listening" in str(e.value)
+
+
+def test_only_the_instance_that_turned_the_proxy_on_turns_it_off(monkeypatch):
+    """Finding 4: a second maxnet (that never enabled anything) used to undo the first one's system proxy on quit."""
+    import maxnet.tui as tui
+    calls = []
+
+    class Fake:
+        owns_system_proxy = False
+        def __init__(self, system_proxy=True): pass
+        def run(self): pass
+    monkeypatch.setattr(tui, "MaxNet", Fake)
+    monkeypatch.setattr(tui.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(tui.sysproxy, "disable", lambda: calls.append("disable"))
+    tui.run()
+    assert calls == []                                  # not the owner: leaves it alone
+    Fake.owns_system_proxy = True
+    tui.run()
+    assert calls == ["disable"]                         # the owner restores
+
+
+def test_config_survives_many_processes_writing_at_once(tmp_path):
+    """Finding 5: non-atomic writes could tear the file and lose the only backup of the user's proxy settings."""
+    import json
+    import subprocess
+    cfg = tmp_path / "config.json"
+    code = ("import sys; from maxnet.net import update_config\n"
+            "for n in range(40): update_config(**{f'k{sys.argv[1]}': n})")
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(i)], env={**os.environ, "MAXNET_CONFIG": str(cfg)}) for i in range(6)]
+    assert all(p.wait(60) == 0 for p in procs)
+    data = json.loads(cfg.read_text())                  # valid JSON, and no writer lost its key
+    assert sorted(data) == [f"k{i}" for i in range(6)] and all(v == 39 for v in data.values())
+
+
+def test_proxy_releases_the_connection_slot_on_a_bad_hostname(server):
+    """Finding 6: a hostname getaddrinfo rejects (UnicodeError) leaked a reserved slot forever."""
+    async def run():
+        p = pool(LO)
+        srv = await serve(p, port=0)
+        port = srv.sockets[0].getsockname()[1]
+        r, w = await asyncio.open_connection("127.0.0.1", port)
+        w.write(b"\x05\x01\x00"); await r.readexactly(2)
+        host = b"a" * 70 + b".example.com"                       # a label over 63 characters
+        w.write(b"\x05\x01\x00\x03" + bytes([len(host)]) + host + (443).to_bytes(2, "big"))
+        await r.read()                                          # the proxy closes on us
+        srv.close()
+        return p.active
+    assert asyncio.run(run()).get(LO.name, 0) == 0
+
+
+def test_launch_reports_a_failed_app_instead_of_crashing(monkeypatch):
+    """Finding 7: one app failing to start used to raise and kill the TUI."""
+    import subprocess
+    import maxnet.apps as apps
+    monkeypatch.setattr(apps, "proxy_up", lambda port: True)
+    monkeypatch.setattr(apps, "running", lambda name: False)
+    def boom(*a, **k): raise subprocess.CalledProcessError(1, "open")
+    monkeypatch.setattr(apps.subprocess, "run", boom)
+    assert "could not start" in apps.launch("Broken App", 1080)
+
+
+def test_two_equally_fast_networks_are_never_called_slow(server, tmp_path, monkeypatch):
+    """Finding 8: healthy networks (even ones idle at the tail) must not be retired."""
+    import maxnet.download as dl
+    real = dl.open_via
+    monkeypatch.setattr(dl, "SLOW_AFTER", 0.05)
+    monkeypatch.setattr(dl, "MONITOR_EVERY", 0.05)
+    monkeypatch.setattr(dl, "SLOW_MIN_BEST", 1000)
+    async def via(iface, host, port, ssl=None, timeout=10.0):
+        return await real(LO, host, port, ssl=ssl)
+    monkeypatch.setattr(dl, "open_via", via)
+    notes = []
+    p = pool(Iface("a", "1.1.1.1"), Iface("b", "2.2.2.2"))
+    out = str(tmp_path / "f.bin")
+    asyncio.run(dl.download(f"http://127.0.0.1:{server}/f", out, p, streams=4, note=notes.append))
+    assert open(out, "rb").read() == DATA and notes == []
+
+
+def test_tui_does_not_shell_out_to_networksetup_every_second(monkeypatch):
+    """Finding 9: unconfigured() spawned a process every tick on the event loop shared with the proxy."""
+    import maxnet.tui as tui
+    calls = []
+    monkeypatch.setattr(tui.netsetup, "unconfigured", lambda: calls.append(1) or [])
+    monkeypatch.setattr(tui.sysproxy, "enable", lambda p: False)
+    monkeypatch.setattr(tui, "PORT", 0)
+    async def run():
+        app = tui.MaxNet(system_proxy=False)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(2.6)                      # at least two 1-second ticks
+    asyncio.run(run())
+    assert len(calls) <= 2, calls                       # once at start (plus at most the menu), not once per tick
+
+
+def test_restricted_pool_shares_counters_but_never_touches_the_real_selection(tmp_path):
+    """Finding 10: the speed test used to swap pool.enabled, rerouting live traffic and risking a persisted wrong choice."""
+    a, b = Iface("a", "1.1.1.1"), Iface("b", "2.2.2.2")
+    p = pool(a, b)
+    v = p.restricted({"a"})
+    assert [i.name for i in v.live()] == ["a"] and p.enabled == {"a", "b"}
+    v.count(a, 1000)
+    assert p.bytes["a"] == 1000                         # counters are shared, so the TUI still shows the test traffic
+    assert p.enabled == {"a", "b"}
+
+
+def test_unique_path_never_overwrites(tmp_path):
+    from maxnet.download import unique_path
+    (tmp_path / "f.iso").write_text("x")
+    assert unique_path(tmp_path / "f.iso").name == "f (1).iso"
+    (tmp_path / "f (1).iso").write_text("x")
+    assert unique_path(tmp_path / "f.iso").name == "f (2).iso"
+    assert unique_path(tmp_path / "new.iso").name == "new.iso"
+
+
+def test_a_crash_while_saving_config_leaves_the_old_file_intact(tmp_path, monkeypatch):
+    """Finding 5 (second half): the saved proxy backup must survive the process dying mid-write."""
+    import json
+    import maxnet.net as net
+    cfg = tmp_path / "config.json"
+    monkeypatch.setattr(net, "CONFIG", cfg)
+    net.update_config(sysproxy_backup={"Wi-Fi": {"enabled": True}})
+    before = cfg.read_text()
+    monkeypatch.setattr(net.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("died before the swap")))
+    with pytest.raises(OSError):
+        net.update_config(other="value")
+    assert cfg.read_text() == before and json.loads(before)["sysproxy_backup"]["Wi-Fi"]["enabled"] is True
+
+
+def test_confirm_screens_preselect_cancel():
+    """A stray Enter must never change the user's system: the safe option comes first on every confirm screen."""
+    import maxnet.tui as tui
+    import maxnet.netsetup as ns
+
+    async def run():
+        app = tui.MaxNet(system_proxy=False)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(0.3)
+            app.pending = ("setup", "en11")
+            app.mode = "setup"
+            app.on_option_list_option_selected(type("E", (), {"option": type("O", (), {"id": "en11"})()})())
+            await pilot.pause(0.1)
+            assert app.mode == "confirm"
+            menu = app.query_one("#menu")
+            assert menu.options[0].id == "back" and menu.highlighted == 0
+            await pilot.press("enter")                     # a stray Enter...
+            await pilot.pause(0.1)
+            assert app.mode == "menu"                      # ...cancels, and nothing was set up
+    ran = []
+    import pytest as _pt
+    mp = _pt.MonkeyPatch()
+    mp.setattr(ns, "setup", lambda name: ran.append(name) or (True, "x"))
+    mp.setattr(tui.sysproxy, "enable", lambda p: False)
+    mp.setattr(tui, "PORT", 0)
+    try:
+        asyncio.run(run())
+    finally:
+        mp.undo()
+    assert ran == []
+
+
+def test_menu_offers_port_setup_as_soon_as_a_new_port_is_found(monkeypatch):
+    """The notice says 'choose Set up new network port in the menu', so that item must really be in the menu."""
+    import maxnet.tui as tui
+    monkeypatch.setattr(tui.netsetup, "unconfigured", lambda: ["en11"])
+    monkeypatch.setattr(tui.sysproxy, "enable", lambda p: False)
+    monkeypatch.setattr(tui, "PORT", 0)
+
+    async def run():
+        app = tui.MaxNet(system_proxy=False)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause(1.5)
+            return [o.id for o in app.query_one("#menu").options]
+    assert asyncio.run(run())[0] == "setup"
