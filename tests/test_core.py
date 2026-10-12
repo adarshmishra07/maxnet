@@ -332,12 +332,15 @@ def test_netsetup_finds_only_link_local_ports_without_a_service(monkeypatch):
     assert ns.unconfigured() == ["en11"]
 
 
-def test_netsetup_creates_service_then_enables_dhcp(monkeypatch):
+def test_netsetup_reports_success_only_when_macos_really_lists_the_port(monkeypatch):
     import maxnet.netsetup as ns
-    calls = []
-    monkeypatch.setattr(ns, "_run", lambda a: calls.append(a) or "")
-    assert ns.setup("en11") == "maxnet en11"
-    assert calls == [["-createnetworkservice", "maxnet en11", "en11"], ["-setdhcp", "maxnet en11"]]
+    monkeypatch.setattr(ns, "_detect", lambda: "")
+    monkeypatch.setattr(ns, "labels", lambda: {})                       # macOS did NOT create it
+    ok, msg = ns.setup("en11")
+    assert ok is False and "did not set up en11" in msg and "Add Service" in msg
+    monkeypatch.setattr(ns, "labels", lambda: {"en11": "Ethernet Adapter (en11)"})  # now it did
+    ok, msg = ns.setup("en11")
+    assert ok is True
 
 
 def test_health_check_reports_real_proxy_path(server):

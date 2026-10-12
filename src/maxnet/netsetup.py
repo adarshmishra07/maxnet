@@ -1,11 +1,12 @@
-"""Find network ports macOS has not set up (a phone just plugged in) and set them up, only when the user confirms."""
+"""Find network ports macOS has not set up (a phone just plugged in) and ask macOS to set them up, only when the user confirms."""
 import socket
+import subprocess
 
 import psutil
 
 from .meta import labels
 from .net import VIRTUAL
-from .sysproxy import SUPPORTED, _run
+from .sysproxy import SUPPORTED
 
 
 def unconfigured():
@@ -24,9 +25,20 @@ def unconfigured():
     return sorted(out)
 
 
+def _detect():
+    """Ask macOS to create network services for any new hardware. Returns the tool's own output."""
+    try:
+        r = subprocess.run(["/usr/sbin/networksetup", "-detectnewhardware"], capture_output=True, text=True, timeout=30)
+        return (r.stdout + r.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return str(e)
+
+
 def setup(name):
-    """Create a network service for `name` and set it to DHCP. Changes macOS Network settings."""
-    service = f"maxnet {name}"
-    _run(["-createnetworkservice", service, name])
-    _run(["-setdhcp", service])
-    return service
+    """Returns (ok, message). ok only if macOS now lists `name` as a network port with a service."""
+    output = _detect()
+    if name in labels():
+        return True, f"macOS set up {name}. It should get an address in a few seconds."
+    detail = f" ({output})" if output else ""
+    return False, (f"macOS did not set up {name}{detail}. Open System Settings > Network, click the ... button, "
+                   "choose Add Service, pick the new port and set it to DHCP.")

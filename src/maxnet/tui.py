@@ -1,3 +1,4 @@
+import signal
 import time
 from pathlib import Path
 
@@ -237,8 +238,8 @@ class MaxNet(App):
         if self.mode == "confirm":
             kind, arg = self.pending
             if key == "yes" and kind == "setup":
-                name = netsetup.setup(arg)
-                self.say(f"Created network service '{name}' with DHCP. It should get an address in a few seconds.", "bold green")
+                ok, msg = netsetup.setup(arg)
+                self.say(msg, "bold green" if ok else "bold red")
             elif key == "yes" and kind == "launch":
                 self.say("\n".join(apps.launch(n, PORT) for n in arg))
             return self.show_menu()
@@ -368,7 +369,12 @@ class MaxNet(App):
 
 
 def run(system_proxy=True):
+    def bye(signum, _frame):  # terminal window closed (SIGHUP) or process terminated (SIGTERM): restore settings first
+        sysproxy.disable()
+        raise SystemExit(128 + signum)
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, bye)
     try:
         MaxNet(system_proxy).run()
     finally:
-        sysproxy.disable()  # also covers Ctrl+C / errors; after a hard kill run `maxnet system off`
+        sysproxy.disable()  # also covers Ctrl+C / errors; after a hard kill (SIGKILL) run `maxnet system off`
