@@ -382,3 +382,64 @@ def test_apps_autodetects_chromium_and_electron_and_attaches_all_by_default(monk
     assert apps.attached() == ["Google Chrome", "Spotify"]               # detach one
     apps.toggle("Slack")
     assert "Slack" in apps.attached()                                    # and re-attach
+
+
+def _keepalive_server(close_after=None):
+    """HTTP/1.1 keep-alive server that counts connections. close_after: silently close a connection after N requests."""
+    stats = {"connections": 0}
+
+    class K(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a): pass
+
+        def setup(self):
+            super().setup()
+            self.served = 0
+
+        def do_GET(self):
+            r = self.headers.get("Range")
+            s, _, e = r.removeprefix("bytes=").partition("-")
+            s, e = int(s), min(int(e), len(DATA) - 1)
+            body = DATA[s:e + 1]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {s}-{e}/{len(DATA)}")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.served += 1
+            if close_after and self.served >= close_after:
+                self.close_connection = True  # closes without telling the client in the response
+
+    class S(ThreadingHTTPServer):
+        def process_request(self, request, client_address):
+            stats["connections"] += 1
+            super().process_request(request, client_address)
+
+    srv = S(("127.0.0.1", 0), K)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, stats
+
+
+def test_download_reuses_one_connection_for_many_blocks(tmp_path):
+    srv, stats = _keepalive_server()
+    try:
+        out = str(tmp_path / "f.bin")
+        p = pool(LO)
+        asyncio.run(download(f"http://127.0.0.1:{srv.server_address[1]}/f", out, p, block=256 * 1024, streams=1))
+        assert open(out, "rb").read() == DATA
+        assert stats["connections"] <= 3, stats  # 1 probe + 1 stream, not one per block (12 blocks)
+    finally:
+        srv.shutdown()
+
+
+def test_download_recovers_when_server_closes_an_idle_connection(tmp_path):
+    srv, stats = _keepalive_server(close_after=2)
+    try:
+        out = str(tmp_path / "f.bin")
+        p = pool(LO)
+        asyncio.run(download(f"http://127.0.0.1:{srv.server_address[1]}/f", out, p, block=256 * 1024, streams=1))
+        assert open(out, "rb").read() == DATA              # every block arrived despite the silent closes
+        assert 3 < stats["connections"] < 12, stats         # reconnected as needed, still far fewer than one per block
+    finally:
+        srv.shutdown()

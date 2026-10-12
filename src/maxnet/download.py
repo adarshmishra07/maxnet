@@ -20,19 +20,31 @@ def safe_filename(url):
     return name if name not in ("", ".", "..") else "download"
 
 
-async def request(iface, url, headers, timeout=10.0):
-    """Minimal HTTP/1.1 GET pinned to `iface`. Returns (status, headers, reader, writer)."""
+async def _connect(iface, url, timeout=10.0):
     u = urlsplit(url)
     tls = u.scheme == "https"
-    reader, writer = await open_via(iface, u.hostname, u.port or (443 if tls else 80),
-                                    ssl=truststore.SSLContext(ssllib.PROTOCOL_TLS_CLIENT) if tls else None, timeout=timeout)
+    return await open_via(iface, u.hostname, u.port or (443 if tls else 80),
+                          ssl=truststore.SSLContext(ssllib.PROTOCOL_TLS_CLIENT) if tls else None, timeout=timeout)
+
+
+async def _send(reader, writer, url, headers, keepalive=False):
+    """Send one GET on an open connection and read the response head. Returns (status, headers)."""
+    u = urlsplit(url)
     path = (u.path or "/") + (f"?{u.query}" if u.query else "")
-    lines = [f"GET {path} HTTP/1.1", f"Host: {u.netloc}", "Connection: close", "Accept-Encoding: identity", "User-Agent: maxnet/0.1"]
+    lines = [f"GET {path} HTTP/1.1", f"Host: {u.netloc}", f"Connection: {'keep-alive' if keepalive else 'close'}",
+             "Accept-Encoding: identity", "User-Agent: maxnet/0.1"]
     lines += [f"{k}: {v}" for k, v in headers.items()]
     writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
     head = (await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), STALL)).decode("latin-1").split("\r\n")
     status = int(head[0].split()[1])
     hdrs = {k.lower(): v.strip() for k, _, v in (h.partition(":") for h in head[1:] if h)}
+    return status, hdrs
+
+
+async def request(iface, url, headers, timeout=10.0):
+    """One-shot HTTP/1.1 GET pinned to `iface`. Returns (status, headers, reader, writer)."""
+    reader, writer = await _connect(iface, url, timeout)
+    status, hdrs = await _send(reader, writer, url, headers)
     return status, hdrs, reader, writer
 
 
@@ -56,8 +68,33 @@ def split_blocks(total, block=BLOCK):
     return [(s, min(s + block, total) - 1) for s in range(0, total, block)]
 
 
-async def _fetch_block(iface, url, fd, start, end, pool, progress):
-    status, h, reader, writer = await request(iface, url, {"Range": f"bytes={start}-{end}"})
+class _Slot:
+    """One stream's connection, kept open between blocks so each block skips the TCP and TLS handshakes."""
+
+    def __init__(self):
+        self.conn = None
+
+    def drop(self):
+        if self.conn:
+            self.conn[1].close()
+            self.conn = None
+
+
+async def _fetch_block(iface, url, fd, start, end, pool, progress, slot):
+    want = end - start + 1
+    for attempt in (0, 1):
+        reused = slot.conn is not None
+        try:
+            if slot.conn is None:
+                slot.conn = await _connect(iface, url)
+            reader, writer = slot.conn
+            status, h = await _send(reader, writer, url, {"Range": f"bytes={start}-{end}"}, keepalive=True)
+            break
+        except (OSError, asyncio.IncompleteReadError, asyncio.TimeoutError):
+            slot.drop()
+            if reused and attempt == 0:
+                continue  # the server closed our idle connection: retry once on a fresh one
+            raise
     try:
         if status != 206:
             raise RuntimeError(f"expected 206, got {status}")
@@ -70,8 +107,11 @@ async def _fetch_block(iface, url, fd, start, end, pool, progress):
             pos += len(data)
             pool.count(iface, len(data))
             progress(len(data))
-    finally:
-        writer.close()
+        if h.get("content-length") != str(want) or "close" in h.get("connection", "").lower():
+            slot.drop()  # the server will not keep it open (or the framing is unclear)
+    except BaseException:
+        slot.drop()
+        raise
 
 
 MAX_FAILS = 3   # a stream that fails this many blocks in a row is retired; the other networks finish the job
@@ -110,6 +150,13 @@ async def download(url, out, pool, progress=lambda n: None, block=None, streams=
         fails = {i.name: 0 for i in ifaces}  # consecutive failures per NETWORK, shared by all its streams
 
         async def worker(iface):
+            slot = _Slot()
+            try:
+                await _work(iface, slot)
+            finally:
+                slot.drop()
+
+        async def _work(iface, slot):
             while fails[iface.name] < MAX_FAILS:  # a network that keeps failing is retired as a whole
                 try:
                     start, end = queue.get_nowait()
@@ -121,7 +168,7 @@ async def download(url, out, pool, progress=lambda n: None, block=None, streams=
                 inflight[0] += 1
                 pool.opened(iface)
                 try:
-                    await _fetch_block(iface, url, fd, start, end, pool, progress)
+                    await _fetch_block(iface, url, fd, start, end, pool, progress, slot)
                     fails[iface.name] = 0
                 except (OSError, RuntimeError, asyncio.IncompleteReadError, asyncio.TimeoutError):
                     fails[iface.name] += 1
