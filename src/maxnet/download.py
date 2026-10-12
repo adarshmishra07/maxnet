@@ -2,7 +2,7 @@
 import asyncio
 import os
 import ssl as ssllib
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 import truststore  # OS trust store, so corporate/WARP-style certificates validate like in curl
 
@@ -10,6 +10,12 @@ from .net import open_via
 
 BLOCK = 8 * 1024 * 1024
 STREAMS_PER_IFACE = 16
+
+
+def safe_filename(url):
+    """File name from a URL, never a path: unquote first, then keep only the last component."""
+    name = os.path.basename(unquote(urlsplit(url).path).replace("\\", "/")).strip()
+    return name if name not in ("", ".", "..") else "download"
 
 
 async def request(iface, url, headers):
@@ -73,7 +79,7 @@ async def download(url, out, pool, progress=lambda n: None, block=BLOCK, streams
         raise RuntimeError("no enabled interfaces: run `maxnet add <name>`")
     url, total = await probe(ifaces[0], url)
     part = out + ".part"
-    fd = os.open(part, os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+    fd = os.open(part, os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW)  # never write through a symlink
     try:
         queue = asyncio.Queue()
         if total is None:

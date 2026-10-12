@@ -1,8 +1,7 @@
 """Speed test: each enabled network alone, then all together, using the real range downloader."""
 import asyncio
 import contextlib
-import glob
-import os
+import shutil
 import tempfile
 import time
 
@@ -21,7 +20,8 @@ async def measure(pool, names, url=URL, secs=10.0):
     """Mbit/s per network while only `names` are enabled. Restores the pool afterwards."""
     saved = pool.enabled
     pool.enabled = set(names)
-    out = os.path.join(tempfile.gettempdir(), f"maxnet-bench-{os.getpid()}.bin")
+    tmp = tempfile.mkdtemp(prefix="maxnet-bench-")  # private 0700 dir, unpredictable name
+    out = f"{tmp}/bench.bin"
     task = asyncio.create_task(download(url, out, pool))
     try:
         await asyncio.wait({task}, timeout=WARMUP)
@@ -37,8 +37,7 @@ async def measure(pool, names, url=URL, secs=10.0):
         with contextlib.suppress(BaseException):
             await task
         pool.enabled = saved
-        for f in glob.glob(out + "*"):
-            os.remove(f)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 async def run_all(pool, report, url=URL, secs=10.0):

@@ -161,3 +161,15 @@ def test_sysproxy_refuses_invalid_port(monkeypatch):
     called = []
     monkeypatch.setattr(sp, "_run", lambda a: called.append(a) or "")
     assert sp.enable(0) is False and called == []
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://x.test/a/b/file.iso", "file.iso"),
+    ("https://x.test/..%2f..%2fetc%2fpasswd", "passwd"),
+    ("https://x.test/%2e%2e", "download"),
+    ("https://x.test/a%5c..%5cevil.bin", "evil.bin"),
+    ("https://x.test/", "download"),
+])
+def test_safe_filename_never_escapes(url, expected):
+    from maxnet.download import safe_filename
+    assert safe_filename(url) == expected

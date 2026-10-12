@@ -1,7 +1,5 @@
-import os
 import time
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -10,7 +8,7 @@ from textual.widgets.option_list import Option
 
 from . import apps, sysproxy
 from .bench import bar, run_all
-from .download import download
+from .download import download, safe_filename
 from .meta import Meta, mask_ip, probe_all, shared_lines
 from .net import Pool, list_interfaces
 from .proxy import serve
@@ -272,7 +270,7 @@ class MaxNet(App):
             self.run_worker(self.dl_worker(url), exclusive=True)
 
     async def dl_worker(self, url):
-        name = unquote(os.path.basename(urlsplit(url).path)) or "download"
+        name = safe_filename(url)
         dest, n = Path.home() / "Downloads" / name, 1
         while dest.exists():
             dest, n = dest.with_name(f"{Path(name).stem} ({n}){Path(name).suffix}"), n + 1

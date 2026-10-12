@@ -1,8 +1,6 @@
 import argparse
 import asyncio
-import os
 import sys
-from urllib.parse import unquote, urlsplit
 
 from .net import Pool, list_interfaces
 
@@ -21,8 +19,9 @@ def _set(name, on):
 
 
 def _dl(url, out):
+    from .download import safe_filename
     pool = Pool()
-    out = out or unquote(os.path.basename(urlsplit(url).path)) or "download"
+    out = out or safe_filename(url)
     done = [0]
 
     def progress(n):
