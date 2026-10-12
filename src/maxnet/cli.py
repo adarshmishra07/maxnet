@@ -77,10 +77,14 @@ def _test(url, secs):
         asyncio.run(run_all(pool, report, url or URL, secs))
     except RuntimeError as e:
         sys.exit(str(e))
+    from .bench import slow_warnings
+    warn = slow_warnings({n[0]: t for n, t in rows if len(n) == 1})
     top = max((t for _, t in rows), default=1) or 1
     print()
     for names, total in rows:
         print(f"{'+'.join(names):16} {bar(total / top)} {total:.1f}")
+    for w in warn:
+        print(f"! {w}")
 
 
 def main():

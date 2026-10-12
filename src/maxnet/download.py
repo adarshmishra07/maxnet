@@ -114,7 +114,10 @@ async def _fetch_block(iface, url, fd, start, end, pool, progress, slot):
         raise
 
 
-MAX_FAILS = 3   # a stream that fails this many blocks in a row is retired; the other networks finish the job
+MAX_FAILS = 3   # a network that fails this many blocks in a row is retired; the other networks finish the job
+SLOW_AFTER = 2.0       # seconds before judging speeds (streams need time to ramp up)
+SLOW_RATIO = 0.10      # a network below 10% of the best one's speed is retired for this download
+SLOW_MIN_BEST = 1_000_000  # bytes/s (8 Mbit/s): below this everything is slow, so there is nothing to compare
 
 
 async def _probe_all(ifaces, url):
@@ -148,6 +151,7 @@ async def download(url, out, pool, progress=lambda n: None, block=None, streams=
             queue.put_nowait(b)
 
         fails = {i.name: 0 for i in ifaces}  # consecutive failures per NETWORK, shared by all its streams
+        tasks = {i.name: [] for i in ifaces}
 
         async def worker(iface):
             slot = _Slot()
@@ -170,6 +174,9 @@ async def download(url, out, pool, progress=lambda n: None, block=None, streams=
                 try:
                     await _fetch_block(iface, url, fd, start, end, pool, progress, slot)
                     fails[iface.name] = 0
+                except asyncio.CancelledError:
+                    queue.put_nowait((start, end))  # this network was retired as too slow: the others take the block
+                    raise
                 except (OSError, RuntimeError, asyncio.IncompleteReadError, asyncio.TimeoutError):
                     fails[iface.name] += 1
                     queue.put_nowait((start, end))  # goes back for the other networks
@@ -178,8 +185,35 @@ async def download(url, out, pool, progress=lambda n: None, block=None, streams=
                     pool.closed(iface)
                     inflight[0] -= 1
 
+        async def monitor():
+            """A network far slower than the best one (throttled, weak signal) only holds blocks back: retire it."""
+            await asyncio.sleep(SLOW_AFTER)
+            while queue.qsize() or inflight[0]:
+                rates = {i.name: pool.rate(i.name) for i in ifaces if any(not t.done() for t in tasks[i.name])}
+                best = max(rates.values(), default=0.0)
+                if best >= SLOW_MIN_BEST:
+                    for name, r in rates.items():
+                        if r < SLOW_RATIO * best:
+                            note(f"{name}: much slower than the others ({r * 8 / 1e6:.0f} Mbit/s), stopped using it for this download")
+                            for t in tasks[name]:
+                                t.cancel()
+                await asyncio.sleep(1.0)
+
         # round-robin across networks, so the first blocks are spread out instead of all taken by the first network
-        await asyncio.gather(*(worker(i) for _ in range(streams) for i in ifaces))
+        workers = []
+        for _ in range(streams):
+            for i in ifaces:
+                t = asyncio.ensure_future(worker(i))
+                tasks[i.name].append(t)
+                workers.append(t)
+        mon = asyncio.ensure_future(monitor())
+        try:
+            results = await asyncio.gather(*workers, return_exceptions=True)
+        finally:
+            mon.cancel()
+        errors = [r for r in results if isinstance(r, Exception)]
+        if errors:
+            raise errors[0]
         if not queue.empty():
             raise RuntimeError("download incomplete: every network gave up on the remaining blocks")
     finally:

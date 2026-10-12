@@ -9,7 +9,7 @@ from textual.widgets import Footer, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from . import apps, netsetup, sysproxy
-from .bench import bar, run_all
+from .bench import bar, run_all, slow_warnings
 from .check import run_checks
 from .download import download, safe_filename
 from .meta import Meta, mask_ip, probe_all, shared_lines
@@ -296,8 +296,12 @@ class MaxNet(App):
             await run_all(self.pool, report)
             singles = [t for n, t, _ in self.results if len(n) == 1]
             both = [t for n, t, _ in self.results if len(n) > 1]
+            warn = slow_warnings({n[0]: t for n, t, _ in self.results if len(n) == 1})
             if singles and both:
                 self.show_results(f"Done. All networks together are {both[0] / max(singles):.1f}x faster than your best single network.")
+                if warn:
+                    cur = self.query_one("#notice", Static).render()
+                    self.query_one("#notice", Static).update(Text.assemble(cur, "\n", Text("! " + "\n! ".join(warn), style="bold #e5c07b")))
             else:
                 self.show_results("Done. Add a second network to see the combined speed.")
         except Exception as e:  # shown to the user, not fatal

@@ -1,9 +1,11 @@
 """Interfaces, the pool that picks one per connection, and sockets pinned to an interface."""
 import asyncio
 import json
+import math
 import os
 import socket
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,8 +56,13 @@ def save_enabled(names):
     update_config(enabled=sorted(names))
 
 
+RATE_WINDOW = 2.0       # seconds: how far back "current speed" looks
+PEAK_HALF_LIFE = 90.0   # seconds: how slowly a network's best observed speed fades
+MIN_WEIGHT = 0.05       # a very slow network still gets an occasional connection, so it can prove it recovered
+
+
 class Pool:
-    """Tracks enabled interfaces and per-interface live counters."""
+    """Tracks enabled interfaces, live counters, and how fast each network really is."""
 
     def __init__(self, enabled=None, lister=list_interfaces):
         self.lister = lister
@@ -68,6 +75,8 @@ class Pool:
             self.enabled = {i.name for i in lister()}
         self.active = {}  # name -> open connections
         self.bytes = {}   # name -> total bytes moved
+        self._ewma = {}   # name -> (decayed byte count, time)
+        self._peak = {}   # name -> (best observed bytes/s, time)
 
     def live(self):
         return [i for i in self.lister() if i.name in self.enabled]
@@ -77,12 +86,32 @@ class Pool:
         save_enabled(self.enabled)
 
     def pick(self, exclude=()):
-        """Least-busy enabled network, skipping the names in `exclude` (ones that just failed)."""
+        """Best enabled network for a new connection, skipping the names in `exclude` (ones that just failed).
+        Connections are shared out by measured speed: a network that is much slower than the best one gets few."""
         live = [i for i in self.live() if i.name not in exclude]
         if not live:
             raise RuntimeError("no enabled network is available")
-        # least open connections wins, so a slow link (long-lived conns) gets fewer new ones
-        return min(live, key=lambda i: (self.active.get(i.name, 0), self.bytes.get(i.name, 0)))
+        return min(live, key=lambda i: ((self.active.get(i.name, 0) + 1) / self.weight(i.name), self.bytes.get(i.name, 0)))
+
+    def rate(self, name, now=None):
+        """Current speed of a network in bytes/s (recent average)."""
+        v, t = self._ewma.get(name, (0.0, 0.0))
+        now = time.monotonic() if now is None else now
+        return v * math.exp(-(now - t) / RATE_WINDOW) / RATE_WINDOW
+
+    def peak(self, name, now=None):
+        """Best speed seen on this network lately, in bytes/s."""
+        pk, t = self._peak.get(name, (0.0, 0.0))
+        now = time.monotonic() if now is None else now
+        return pk * 0.5 ** ((now - t) / PEAK_HALF_LIFE)
+
+    def weight(self, name):
+        """Relative capacity 0.05..1 of a network. Unknown networks count as the best one, so every network gets a chance."""
+        best = max((self.peak(n) for n in self._peak), default=0.0)
+        mine = self.peak(name)
+        if best <= 0 or mine <= 0:
+            return 1.0
+        return max(mine / best, MIN_WEIGHT)
 
     def opened(self, iface):
         self.active[iface.name] = self.active.get(iface.name, 0) + 1
@@ -91,7 +120,11 @@ class Pool:
         self.active[iface.name] = max(0, self.active.get(iface.name, 0) - 1)
 
     def count(self, iface, n):
-        self.bytes[iface.name] = self.bytes.get(iface.name, 0) + n
+        name, now = iface.name, time.monotonic()
+        self.bytes[name] = self.bytes.get(name, 0) + n
+        v, t = self._ewma.get(name, (0.0, now))
+        self._ewma[name] = (v * math.exp(-(now - t) / RATE_WINDOW) + n, now)
+        self._peak[name] = (max(self.peak(name, now), self.rate(name, now)), now)
 
 
 def _pin(sock, iface):

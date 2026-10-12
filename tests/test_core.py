@@ -443,3 +443,63 @@ def test_download_recovers_when_server_closes_an_idle_connection(tmp_path):
         assert 3 < stats["connections"] < 12, stats         # reconnected as needed, still far fewer than one per block
     finally:
         srv.shutdown()
+
+
+def test_slow_network_warning_names_the_throttled_one():
+    from maxnet.bench import slow_warnings
+    w = slow_warnings({"en0": 108.0, "en7": 81.0, "en9": 1.2})
+    assert len(w) == 1 and w[0].startswith("en9 is much slower")
+    assert slow_warnings({"en0": 108.0, "en7": 90.0}) == []        # similar networks: no warning
+    assert slow_warnings({"en0": 8.0, "en9": 0.5}) == []           # everything slow: not a "slow one out" situation
+
+
+def test_pick_prefers_the_faster_network_and_starves_a_throttled_one():
+    from maxnet.net import MIN_WEIGHT
+    fast, slow = Iface("fast", "1.1.1.1"), Iface("slow", "2.2.2.2")
+    p = pool(fast, slow)
+    p._peak = {"fast": (12_000_000.0, __import__("time").monotonic()), "slow": (150_000.0, __import__("time").monotonic())}  # 96 vs 1.2 Mbit/s
+    picks = []
+    for _ in range(60):                     # 60 new connections arrive, none ever finishes
+        i = p.pick(); p.opened(i); picks.append(i.name)
+    assert picks.count("slow") <= 4         # the throttled network gets only the occasional connection
+    assert p.weight("slow") == MIN_WEIGHT
+
+
+def test_unknown_networks_get_a_fair_chance():
+    a, b = Iface("a", "1.1.1.1"), Iface("b", "2.2.2.2")
+    p = pool(a, b)
+    assert p.weight("a") == 1.0 and p.weight("b") == 1.0
+    p.count(a, 1_000_000)                   # only "a" has been measured; "b" is unknown so it counts as fully capable
+    assert p.weight("b") == 1.0
+
+
+def test_download_stops_using_a_network_that_is_far_slower_than_the_best(server, tmp_path, monkeypatch):
+    """Regression: a throttled network used to hold blocks back and drag the whole download below the best single network."""
+    import time
+    import maxnet.download as dl
+    real = dl.open_via
+    monkeypatch.setattr(dl, "SLOW_AFTER", 0.3)
+    monkeypatch.setattr(dl, "SLOW_MIN_BEST", 1000)   # loopback bursts are short; real networks are sustained
+
+    class SlowReader:
+        def __init__(self, r): self.r = r
+        async def read(self, n):
+            await asyncio.sleep(0.6)            # a throttled phone: one 64 KB chunk every 0.6 s
+            return await self.r.read(n)
+        async def readuntil(self, sep): return await self.r.readuntil(sep)
+        def at_eof(self): return self.r.at_eof()
+
+    async def via(iface, host, port, ssl=None, timeout=10.0):
+        r, w = await real(LO, host, port, ssl=ssl)
+        return (SlowReader(r), w) if iface.name == "slow" else (r, w)
+    monkeypatch.setattr(dl, "open_via", via)
+    notes = []
+    p = pool(Iface("fast", "1.1.1.1"), Iface("slow", "2.2.2.2"))
+    out = str(tmp_path / "f.bin")
+    t0 = time.monotonic()
+    asyncio.run(dl.download(f"http://127.0.0.1:{server}/f", out, p, streams=4, note=notes.append))
+    took = time.monotonic() - t0
+    assert open(out, "rb").read() == DATA
+    assert took < 2.5, took                                # without the monitor this takes ~4+ s
+    assert p.bytes.get("slow", 0) < 500_000, p.bytes       # the slow network ends up carrying little
+    assert any("slow" in n and "much slower" in n for n in notes), notes

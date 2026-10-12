@@ -46,3 +46,14 @@ async def run_all(pool, report, url=URL, secs=10.0):
     steps = [[n] for n in names] + ([names] if len(names) > 1 else [])
     for combo in steps:
         report(combo, await measure(pool, combo, url, secs))
+
+
+def slow_warnings(single):
+    """single: {network: Mbit/s measured alone}. Names a network that is far slower than the best one."""
+    if not single:
+        return []
+    best = max(single.values())
+    if best < 20:
+        return []
+    return [f"{n} is much slower than the others ({v:.0f} Mbit/s). It may be throttled, out of data, or have a weak signal."
+            for n, v in single.items() if v < 0.15 * best]
