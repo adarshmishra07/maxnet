@@ -9,10 +9,10 @@ Plug in your phone over USB, keep Wi-Fi on, and maxnet spreads your traffic acro
 ```
 ● ON  apps follow your macOS proxy settings and use 3 networks together   312.4 Mbit/s now
 
-Wi-Fi  (en0)  ● in use   4 active downloads
+Wi-Fi  (en0)  ● in use   4 open connections
   ━━━━━━━━━━━━━━━━━━━━──────────   71.2 Mbit/s   1,204 MB so far
   ping 17 ms  ·  203.•••.•••.••• · <your ISP> · <your city>
-iPhone USB  (en9)  ● in use   5 active downloads
+iPhone USB  (en9)  ● in use   5 open connections
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  168.0 Mbit/s   2,980 MB so far
 ```
 
