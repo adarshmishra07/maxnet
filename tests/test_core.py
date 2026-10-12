@@ -108,7 +108,7 @@ def test_concurrent_connections_spread_across_networks(server, monkeypatch):
     import maxnet.proxy as proxy
     real = proxy.open_via
 
-    async def slow(iface, host, port, ssl=None):
+    async def slow(iface, host, port, ssl=None, timeout=10.0):
         await asyncio.sleep(0.1)          # widen the window between pick() and connect finishing
         return await real(LO, host, port)  # fake ifaces can't be pinned, use loopback
     monkeypatch.setattr(proxy, "open_via", slow)
@@ -118,7 +118,7 @@ def test_concurrent_connections_spread_across_networks(server, monkeypatch):
         p = pool(*ifaces)
         picked = []
         real_pick = p.pick
-        p.pick = lambda: (picked.append(real_pick()) or picked[-1])
+        p.pick = lambda **kw: (picked.append(real_pick(**kw)) or picked[-1])
         srv = await serve(p, port=0)
         port = srv.sockets[0].getsockname()[1]
 
@@ -173,3 +173,142 @@ def test_sysproxy_refuses_invalid_port(monkeypatch):
 def test_safe_filename_never_escapes(url, expected):
     from maxnet.download import safe_filename
     assert safe_filename(url) == expected
+
+
+def test_download_spreads_blocks_across_all_networks(server, tmp_path, monkeypatch):
+    """Regression: a small file used to be taken entirely by the first network's workers."""
+    import maxnet.download as dl
+    real = dl.open_via
+
+    async def via_loopback(iface, host, port, ssl=None, timeout=10.0):
+        return await real(LO, host, port, ssl=ssl)  # fake ifaces can't be pinned, route all to loopback
+    monkeypatch.setattr(dl, "open_via", via_loopback)
+    ifaces = [Iface("a", "1.1.1.1"), Iface("b", "2.2.2.2"), Iface("c", "3.3.3.3")]
+    p = pool(*ifaces)
+    out = str(tmp_path / "f.bin")
+    asyncio.run(dl.download(f"http://127.0.0.1:{server}/f", out, p))
+    assert open(out, "rb").read() == DATA
+    assert all(p.bytes.get(n, 0) > 0 for n in "abc"), p.bytes
+
+
+def test_open_via_fails_fast_when_network_cannot_reach_host():
+    """Regression: an unreachable network used to hang forever and stall the whole download."""
+    import time
+    from maxnet.net import open_via
+
+    async def run():
+        t0 = time.monotonic()
+        with pytest.raises(OSError):  # ConnectionError (timeout) or an immediate "network unreachable", both fail fast
+            await open_via(LO, "10.255.255.1", 9, timeout=0.5)
+        return time.monotonic() - t0
+    assert asyncio.run(run()) < 3
+
+
+def test_download_survives_a_network_that_cannot_reach_the_server(server, tmp_path, monkeypatch):
+    """Regression: one dead network (first in the list) must not fail the download or stall it."""
+    import maxnet.download as dl
+    real = dl.open_via
+
+    async def flaky(iface, host, port, ssl=None, timeout=10.0):
+        if iface.name == "dead":
+            raise ConnectionError("dead could not reach the host")
+        return await real(LO, host, port, ssl=ssl)
+    monkeypatch.setattr(dl, "open_via", flaky)
+    ifaces = [Iface("dead", "9.9.9.9"), Iface("b", "2.2.2.2"), Iface("c", "3.3.3.3")]
+    p = pool(*ifaces)
+    out = str(tmp_path / "f.bin")
+    asyncio.run(dl.download(f"http://127.0.0.1:{server}/f", out, p))
+    assert open(out, "rb").read() == DATA
+    assert p.bytes.get("dead", 0) == 0 and p.bytes["b"] > 0 and p.bytes["c"] > 0
+
+
+def test_download_survives_a_network_that_connects_but_never_sends(server, tmp_path, monkeypatch):
+    """Regression: a stalled stream used to hang the download forever."""
+    import maxnet.download as dl
+    real = dl.open_via
+    monkeypatch.setattr(dl, "STALL", 0.5)
+
+    class Silent:
+        async def read(self, n):
+            await asyncio.sleep(3600)
+        async def readuntil(self, sep):
+            await asyncio.sleep(3600)
+
+    class W:
+        def write(self, d): pass
+        def close(self): pass
+
+    async def maybe_silent(iface, host, port, ssl=None, timeout=10.0):
+        if iface.name == "mute":
+            return Silent(), W()
+        return await real(LO, host, port, ssl=ssl)
+    monkeypatch.setattr(dl, "open_via", maybe_silent)
+    p = pool(Iface("mute", "9.9.9.9"), Iface("b", "2.2.2.2"))
+    out = str(tmp_path / "f.bin")
+    asyncio.run(asyncio.wait_for(dl.download(f"http://127.0.0.1:{server}/f", out, p), 30))
+    assert open(out, "rb").read() == DATA
+
+
+def test_pick_skips_excluded_networks():
+    a, b = Iface("a", "1.1.1.1"), Iface("b", "2.2.2.2")
+    p = pool(a, b)
+    assert p.pick(exclude={"a"}) == b
+    with pytest.raises(RuntimeError):
+        p.pick(exclude={"a", "b"})
+
+
+def test_proxy_skips_a_network_that_just_dropped(server, monkeypatch):
+    """A network that fails to connect must not fail the request: the next network is tried."""
+    import maxnet.proxy as proxy
+    real = proxy.open_via
+
+    async def flaky(iface, host, port, ssl=None, timeout=10.0):
+        if iface.name == "gone":
+            raise ConnectionError("network unreachable")
+        return await real(LO, host, port)
+    monkeypatch.setattr(proxy, "open_via", flaky)
+
+    async def run():
+        p = pool(Iface("gone", "9.9.9.9"), Iface("up", "2.2.2.2"))
+        srv = await serve(p, port=0)
+        port = srv.sockets[0].getsockname()[1]
+        r, w = await asyncio.open_connection("127.0.0.1", port)
+        w.write(f"GET http://127.0.0.1:{server}/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+        body = await r.read()
+        srv.close()
+        return body, p.active
+    body, active = asyncio.run(run())
+    assert DATA in body and active == {"gone": 0, "up": 0}  # served, and no connection slot leaked
+
+
+def test_tui_pauses_system_proxy_when_all_networks_drop_and_resumes(monkeypatch):
+    """Simulated disconnect (no real cable to pull in CI): proxy goes OFF with none left, back ON when one returns."""
+    import maxnet.tui as tui
+    state = {"on": False, "ifaces": [Iface("a", "1.1.1.1")], "enabled": 0, "disabled": 0}
+
+    def enable(port):
+        state.update(on=True, enabled=state["enabled"] + 1)
+        return True
+
+    def disable():
+        state.update(on=False, disabled=state["disabled"] + 1)
+        return True
+    monkeypatch.setattr(tui.sysproxy, "enable", enable)
+    monkeypatch.setattr(tui.sysproxy, "disable", disable)
+    monkeypatch.setattr(tui.sysproxy, "active", lambda: state["on"])
+    monkeypatch.setattr(tui, "list_interfaces", lambda: state["ifaces"])
+    monkeypatch.setattr(tui, "PORT", 0)
+
+    async def run():
+        app = tui.MaxNet()
+        app.pool = Pool(enabled={"a"}, lister=lambda: state["ifaces"])
+        async with app.run_test(size=(110, 40)) as pilot:
+            await pilot.pause(0.3)
+            assert state["on"] is True and app.proxy_ok  # it turned itself ON at startup
+            state["ifaces"] = []                 # every network disconnects
+            app.tick(); await pilot.pause(0.1)
+            assert state["on"] is False and app.auto_paused is True
+            state["ifaces"] = [Iface("a", "1.1.1.1")]  # one comes back
+            app.tick(); await pilot.pause(0.1)
+            assert state["on"] is True and app.auto_paused is False
+    asyncio.run(run())

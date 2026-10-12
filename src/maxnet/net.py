@@ -76,10 +76,11 @@ class Pool:
         self.enabled = self.enabled ^ {name}
         save_enabled(self.enabled)
 
-    def pick(self):
-        live = self.live()
+    def pick(self, exclude=()):
+        """Least-busy enabled network, skipping the names in `exclude` (ones that just failed)."""
+        live = [i for i in self.live() if i.name not in exclude]
         if not live:
-            raise RuntimeError("no enabled interfaces: run `maxnet add <name>`")
+            raise RuntimeError("no enabled network is available")
         # least open connections wins, so a slow link (long-lived conns) gets fewer new ones
         return min(live, key=lambda i: (self.active.get(i.name, 0), self.bytes.get(i.name, 0)))
 
@@ -104,15 +105,18 @@ def _pin(sock, iface):
     sock.bind((iface.ip, 0))
 
 
-async def open_via(iface, host, port, ssl=None):
-    """TCP connection that leaves through `iface` (IPv4 only)."""
+async def open_via(iface, host, port, ssl=None, timeout=10.0):
+    """TCP connection that leaves through `iface` (IPv4 only). Fails fast (ConnectionError) if the network can't reach the host."""
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.setblocking(False)
         _pin(sock, iface)
-        await loop.sock_connect(sock, infos[0][4])
+        try:
+            await asyncio.wait_for(loop.sock_connect(sock, infos[0][4]), timeout)
+        except asyncio.TimeoutError:
+            raise ConnectionError(f"{iface.name} could not reach {host}:{port} within {timeout:.0f}s") from None
         return await asyncio.open_connection(sock=sock, ssl=ssl, server_hostname=host if ssl else None)
     except BaseException:
         sock.close()

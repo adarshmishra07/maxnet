@@ -19,14 +19,20 @@ async def _pipe(src, dst, pool, iface):
 
 
 async def _relay(reader, writer, pool, host, port, first=b"", ok=b""):
-    iface = pool.pick()
-    pool.opened(iface)  # reserve now: concurrent picks during the connect must see this slot as taken
-    try:
-        up_r, up_w = await open_via(iface, host, port)
-    except OSError:
-        pool.closed(iface)
-        writer.close()
-        return False
+    failed = set()
+    while True:  # a network that just dropped or can't reach the host is skipped; the next one is tried
+        try:
+            iface = pool.pick(exclude=failed)
+        except RuntimeError:
+            writer.close()
+            return False
+        pool.opened(iface)  # reserve now: concurrent picks during the connect must see this slot as taken
+        try:
+            up_r, up_w = await open_via(iface, host, port)
+            break
+        except OSError:
+            pool.closed(iface)
+            failed.add(iface.name)
     try:
         if ok:
             writer.write(ok)

@@ -36,7 +36,7 @@ def _dl(url, out):
 
 async def _timed(url, out, pool, progress):
     from .download import download
-    return await download(url, out, pool, progress)
+    return await download(url, out, pool, progress, note=lambda m: print(f"\n{m}", file=sys.stderr))
 
 
 def _apps(a):
@@ -84,6 +84,7 @@ def main():
     p = argparse.ArgumentParser(prog="maxnet", description="Use every internet connection at once.")
     from . import __version__
     p.add_argument("--version", action="version", version=f"maxnet {__version__}")
+    p.add_argument("--no-system-proxy", action="store_true", help="do not change the macOS system proxy when the TUI starts")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("list", help="show interfaces and which are in the pool").add_argument("--show-ip", action="store_true")
     sub.add_parser("add", help="add an interface to the pool").add_argument("name")
@@ -142,4 +143,4 @@ def main():
         asyncio.run(run())
     else:
         from .tui import run
-        run()
+        run(system_proxy=not a.no_system_proxy)

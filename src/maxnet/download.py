@@ -8,8 +8,10 @@ import truststore  # OS trust store, so corporate/WARP-style certificates valida
 
 from .net import open_via
 
-BLOCK = 8 * 1024 * 1024
+BLOCK = 8 * 1024 * 1024      # largest block
+MIN_BLOCK = 1024 * 1024      # smallest block; small files get small blocks so every stream has work
 STREAMS_PER_IFACE = 16
+STALL = 15.0  # seconds without any data before a stream gives up and its block goes to another network
 
 
 def safe_filename(url):
@@ -18,26 +20,26 @@ def safe_filename(url):
     return name if name not in ("", ".", "..") else "download"
 
 
-async def request(iface, url, headers):
+async def request(iface, url, headers, timeout=10.0):
     """Minimal HTTP/1.1 GET pinned to `iface`. Returns (status, headers, reader, writer)."""
     u = urlsplit(url)
     tls = u.scheme == "https"
     reader, writer = await open_via(iface, u.hostname, u.port or (443 if tls else 80),
-                                    ssl=truststore.SSLContext(ssllib.PROTOCOL_TLS_CLIENT) if tls else None)
+                                    ssl=truststore.SSLContext(ssllib.PROTOCOL_TLS_CLIENT) if tls else None, timeout=timeout)
     path = (u.path or "/") + (f"?{u.query}" if u.query else "")
     lines = [f"GET {path} HTTP/1.1", f"Host: {u.netloc}", "Connection: close", "Accept-Encoding: identity", "User-Agent: maxnet/0.1"]
     lines += [f"{k}: {v}" for k, v in headers.items()]
     writer.write(("\r\n".join(lines) + "\r\n\r\n").encode())
-    head = (await reader.readuntil(b"\r\n\r\n")).decode("latin-1").split("\r\n")
+    head = (await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), STALL)).decode("latin-1").split("\r\n")
     status = int(head[0].split()[1])
     hdrs = {k.lower(): v.strip() for k, _, v in (h.partition(":") for h in head[1:] if h)}
     return status, hdrs, reader, writer
 
 
-async def probe(iface, url):
+async def probe(iface, url, timeout=5.0):
     """Follow redirects; return (final_url, total_size or None if ranges unsupported)."""
     for _ in range(8):
-        status, h, _, w = await request(iface, url, {"Range": "bytes=0-0"})
+        status, h, _, w = await request(iface, url, {"Range": "bytes=0-0"}, timeout)
         w.close()
         if status in (301, 302, 303, 307, 308):
             url = urljoin(url, h["location"])
@@ -61,7 +63,7 @@ async def _fetch_block(iface, url, fd, start, end, pool, progress):
             raise RuntimeError(f"expected 206, got {status}")
         pos = start
         while pos <= end:
-            data = await reader.read(min(65536, end - pos + 1))
+            data = await asyncio.wait_for(reader.read(min(65536, end - pos + 1)), STALL)
             if not data:
                 raise ConnectionError("short block")
             os.pwrite(fd, data, pos)
@@ -72,39 +74,67 @@ async def _fetch_block(iface, url, fd, start, end, pool, progress):
         writer.close()
 
 
-async def download(url, out, pool, progress=lambda n: None, block=BLOCK, streams=STREAMS_PER_IFACE):
-    """Returns total bytes. Single-stream fallback when the server ignores Range."""
+MAX_FAILS = 3   # a stream that fails this many blocks in a row is retired; the other networks finish the job
+
+
+async def _probe_all(ifaces, url):
+    """Probe every network at once. Returns (final_url, size, networks that can reach the server)."""
+    results = await asyncio.gather(*(probe(i, url) for i in ifaces), return_exceptions=True)
+    good = [(i, r) for i, r in zip(ifaces, results) if not isinstance(r, BaseException)]
+    if not good:
+        raise RuntimeError(f"no network could reach the server: {results[0]}")
+    return good[0][1][0], good[0][1][1], [i for i, _ in good]
+
+
+async def download(url, out, pool, progress=lambda n: None, block=None, streams=STREAMS_PER_IFACE, note=lambda msg: None):
+    """Returns total bytes. Needs a server that supports Range requests."""
     ifaces = pool.live()
     if not ifaces:
         raise RuntimeError("no enabled interfaces: run `maxnet add <name>`")
-    url, total = await probe(ifaces[0], url)
+    url, total, reachable = await _probe_all(ifaces, url)
+    for i in ifaces:
+        if i not in reachable:
+            note(f"{i.name}: cannot reach the server, skipped")
+    ifaces = reachable
+    if total is None:
+        raise RuntimeError("server does not support Range requests; use curl via the proxy instead")
     part = out + ".part"
     fd = os.open(part, os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW)  # never write through a symlink
     try:
-        queue = asyncio.Queue()
-        if total is None:
-            raise RuntimeError("server does not support Range requests; use curl via the proxy instead")
+        queue, inflight = asyncio.Queue(), [0]
         os.ftruncate(fd, total)
+        block = block or max(MIN_BLOCK, min(BLOCK, total // (len(ifaces) * streams * 2)))
         for b in split_blocks(total, block):
-            queue.put_nowait((b, 0))
+            queue.put_nowait(b)
+
+        fails = {i.name: 0 for i in ifaces}  # consecutive failures per NETWORK, shared by all its streams
 
         async def worker(iface):
-            while True:
+            while fails[iface.name] < MAX_FAILS:  # a network that keeps failing is retired as a whole
                 try:
-                    (start, end), tries = queue.get_nowait()
+                    start, end = queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    return
+                    if not inflight[0]:
+                        return
+                    await asyncio.sleep(0.05)  # a block in flight may still fail and come back
+                    continue
+                inflight[0] += 1
                 pool.opened(iface)
                 try:
                     await _fetch_block(iface, url, fd, start, end, pool, progress)
-                except (OSError, RuntimeError, asyncio.IncompleteReadError):
-                    if tries >= 5:
-                        raise
-                    queue.put_nowait(((start, end), tries + 1))  # another stream/network retries it
+                    fails[iface.name] = 0
+                except (OSError, RuntimeError, asyncio.IncompleteReadError, asyncio.TimeoutError):
+                    fails[iface.name] += 1
+                    queue.put_nowait((start, end))  # goes back for the other networks
+                    await asyncio.sleep(0.05)       # let a healthy stream grab it first
                 finally:
                     pool.closed(iface)
+                    inflight[0] -= 1
 
-        await asyncio.gather(*(worker(i) for i in ifaces for _ in range(streams)))
+        # round-robin across networks, so the first blocks are spread out instead of all taken by the first network
+        await asyncio.gather(*(worker(i) for _ in range(streams) for i in ifaces))
+        if not queue.empty():
+            raise RuntimeError("download incomplete: every network gave up on the remaining blocks")
     finally:
         os.close(fd)
     os.replace(part, out)

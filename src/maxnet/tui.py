@@ -37,8 +37,9 @@ class MaxNet(App):
     """
     BINDINGS = [("o", "toggle_sys", "on/off"), ("escape", "back", "back"), ("i", "toggle_ip", "show/hide IP"), ("q", "ask_quit", "quit")]
 
-    def __init__(self):
+    def __init__(self, system_proxy=True):
         super().__init__()
+        self.system_proxy = system_proxy
         self.pool = Pool()
         self.last, self.rate = {}, {}
         self.peak = 1.0
@@ -46,6 +47,7 @@ class MaxNet(App):
         self.busy = False
         self.show_ip = False
         self.proxy_ok = False
+        self.auto_paused = False  # True while we turned ourselves OFF because every network disconnected
         self.results = []
         self.metas, self.tests = {}, {}
 
@@ -62,7 +64,8 @@ class MaxNet(App):
         try:
             await serve(self.pool, port=PORT)
             self.proxy_ok = True
-            sysproxy.enable(PORT)  # restored when you quit
+            if self.system_proxy and self.pool.live():
+                sysproxy.enable(PORT)  # restored when you quit
         except OSError:
             self.say(f"Port {PORT} is already in use (is another maxnet open?). Dashboard works, but nothing is routed.", "red")
         self.set_interval(1, self.tick)
@@ -91,17 +94,21 @@ class MaxNet(App):
             self.last[i.name] = (now, total)
         self.peak = max(self.peak, *self.rate.values(), 1.0)
         live = [i for i in ifaces if i.name in self.pool.enabled]
+        self.guard_system_proxy(live)
         agg = sum(self.rate.get(i.name, 0) for i in live) * 8 / 1e6
 
         st = Text()
         syson = sysproxy.active()
-        if syson:
+        if self.auto_paused:
+            st.append("⚠ PAUSED  ", style="bold #e5c07b")
+            st.append("no selected network is connected. Your Mac uses its normal settings and maxnet turns back on when one returns.", style="dim")
+        elif syson:
             st.append("● ON  ", style="bold green")
             st.append(f"apps follow your macOS proxy settings and use {len(live)} network{'s' if len(live) != 1 else ''} together   ")
             st.append(f"{agg:.1f} Mbit/s now", style=f"bold {ACCENT}")
         else:
             st.append("○ OFF  ", style="bold")
-            st.append("your Mac uses its normal single connection. Press o to turn on.", style="dim")
+            st.append(f"{len(live)} network{'s' if len(live) != 1 else ''} ready. Your Mac still uses its normal single connection. Press o to turn on.", style="dim")
         self.query_one("#status", Static).update(st)
 
         out = Text()
@@ -123,6 +130,19 @@ class MaxNet(App):
         elif len(live) < 2:
             out.append("\nTip: use at least two networks (for example Wi-Fi + a phone over USB) to get more speed.\n", style="#e5c07b")
         self.query_one("#cards", Static).update(out)
+
+    def guard_system_proxy(self, live):
+        """Never leave the Mac pointing at a proxy with no network behind it."""
+        if not (self.system_proxy and self.proxy_ok):
+            return
+        if not live and sysproxy.active():
+            sysproxy.disable()
+            self.auto_paused = True
+            self.say("All selected networks disconnected. Turned OFF so your Mac keeps its normal connection.", "bold #e5c07b")
+        elif live and self.auto_paused:
+            self.auto_paused = False  # only resume what we paused; a manual OFF stays OFF
+            if sysproxy.enable(PORT):
+                self.say("A network is back. Turned ON again.", "bold green")
 
     def detail(self, i, m):
         if m.reachable is None:
@@ -195,6 +215,10 @@ class MaxNet(App):
             return self.exit() if key == "yes" else self.show_menu()
 
     def toggle_sys(self):
+        if not self.system_proxy:
+            self.say("System proxy changes are disabled (started with --no-system-proxy).")
+            return
+        self.auto_paused = False
         if sysproxy.active():
             sysproxy.disable()
             self.say("Turned OFF. Your original proxy settings are restored.")
@@ -301,8 +325,8 @@ class MaxNet(App):
         self.fill("quit", [("yes", "Turn OFF and quit"), ("no", "← Stay")])
 
 
-def run():
+def run(system_proxy=True):
     try:
-        MaxNet().run()
+        MaxNet(system_proxy).run()
     finally:
         sysproxy.disable()  # also covers Ctrl+C / errors; after a hard kill run `maxnet system off`
