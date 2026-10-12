@@ -1,5 +1,6 @@
 """Local SOCKS5 + HTTP proxy on one port. Every new connection leaves via the pool's pick."""
 import asyncio
+import contextlib
 import socket
 from urllib.parse import urlsplit
 
@@ -15,7 +16,8 @@ async def _pipe(src, dst, pool, iface):
     except (ConnectionError, OSError):
         pass
     finally:
-        dst.close()
+        with contextlib.suppress(RuntimeError):  # the event loop may already be closing at shutdown
+            dst.close()
 
 
 async def _relay(reader, writer, pool, host, port, first=b"", ok=b""):
@@ -32,6 +34,7 @@ async def _relay(reader, writer, pool, host, port, first=b"", ok=b""):
             break
         except OSError:
             pool.closed(iface)
+            pool.mark(iface.name, False)  # no working internet on it right now: stop sending it traffic until it passes a check
             failed.add(iface.name)
         except BaseException:  # bad hostname (UnicodeError), cancelled handler, ...: never leave the slot reserved
             pool.closed(iface)
@@ -44,7 +47,8 @@ async def _relay(reader, writer, pool, host, port, first=b"", ok=b""):
         await asyncio.gather(_pipe(reader, up_w, pool, iface), _pipe(up_r, writer, pool, iface))
     finally:
         pool.closed(iface)
-        up_w.close()
+        with contextlib.suppress(RuntimeError):
+            up_w.close()
     return True
 
 
@@ -80,8 +84,11 @@ async def _http(reader, writer, pool, first):
     await _relay(reader, writer, pool, u.hostname, u.port or 80, first=fwd)
 
 
-def handler(pool):
+def handler(pool, tasks):
     async def handle(reader, writer):
+        task = asyncio.current_task()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
         try:
             first = await reader.readexactly(1)
             if first == b"\x05":
@@ -91,9 +98,22 @@ def handler(pool):
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, ConnectionError, ValueError, RuntimeError, OSError):
             pass
         finally:
-            writer.close()
+            with contextlib.suppress(RuntimeError):
+                writer.close()
     return handle
 
 
 async def serve(pool, host="127.0.0.1", port=1080):
-    return await asyncio.start_server(handler(pool), host, port)
+    tasks = set()
+    server = await asyncio.start_server(handler(pool, tasks), host, port)
+    server.maxnet_tasks = tasks  # so shutdown() can finish the open connections
+    return server
+
+
+async def shutdown(server):
+    """Stop listening and end every open connection cleanly, so quitting prints no 'Event loop is closed' errors."""
+    server.close()
+    tasks = list(getattr(server, "maxnet_tasks", ()))
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)

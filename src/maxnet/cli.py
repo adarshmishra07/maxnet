@@ -144,12 +144,18 @@ def main():
     elif a.cmd == "dl":
         _dl(a.url, a.output)
     elif a.cmd == "proxy":
-        from .proxy import serve
+        from .net import health_loop
+        from .proxy import serve, shutdown
 
         async def run():
-            await serve(Pool(), port=a.port)
+            pool = Pool()
+            server = await serve(pool, port=a.port)
+            asyncio.ensure_future(health_loop(pool))
             print(f"proxy on 127.0.0.1:{a.port} (SOCKS5 + HTTP)")
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await shutdown(server)
         asyncio.run(run())
     else:
         from .tui import run

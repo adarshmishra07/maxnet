@@ -120,7 +120,7 @@ maxnet is free software provided "as is", without warranty of any kind (see [LIC
 ## Safety and privacy
 
 - Turning ON changes your macOS system proxy. Original settings are saved to the config file and restored on OFF, on quit, and by `maxnet system off` if maxnet is killed.
-- `maxnet` looks up your public IP and ISP through ip-api.com (over plain HTTP, once a minute) to show line info and detect shared lines. Set `MAXNET_NO_LOOKUP=1` to skip it.
+- `maxnet` looks up your public IP and ISP through ip-api.com (over plain HTTP, once a minute) to show line info and detect shared lines. Set `MAXNET_NO_LOOKUP=1` to skip it. Set `MAXNET_PORT=1099` to run the proxy on another port than 1080.
 - Nothing else leaves your machine, and there is no telemetry.
 - Found a security problem? Please use GitHub's private vulnerability reporting on this repo instead of a public issue.
 

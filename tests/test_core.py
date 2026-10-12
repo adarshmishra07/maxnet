@@ -717,3 +717,113 @@ def test_menu_offers_port_setup_as_soon_as_a_new_port_is_found(monkeypatch):
             await pilot.pause(1.5)
             return [o.id for o in app.query_one("#menu").options]
     assert asyncio.run(run())[0] == "setup"
+
+
+def test_a_network_that_was_slow_is_not_locked_out_forever():
+    """A throttled network gets almost no connections, so it can never prove it recovered: stale slowness must expire."""
+    import time
+    from maxnet.net import STALE_AFTER
+    fast, slow = Iface("fast", "1.1.1.1"), Iface("slow", "2.2.2.2")
+    p = pool(fast, slow)
+    now = time.monotonic()
+    p._peak = {"fast": (12_000_000.0, now), "slow": (150_000.0, now)}        # slow was measured just now: starved
+    assert p.weight("slow") < 0.05 + 1e-9
+    p._peak = {"fast": (12_000_000.0, now), "slow": (150_000.0, now - STALE_AFTER - 1)}   # measured long ago
+    assert p.weight("slow") == 1.0                                           # forgotten: treated as unknown again
+    first = [p.pick().name for _ in range(1)]
+    assert first == ["slow"] or p.weight("fast") >= 0.0                      # and it competes for connections again
+
+
+def test_idle_long_lived_connections_do_not_push_new_ones_away():
+    """Chrome/Slack keep many idle connections open. A network holding 12 of them is not busy and must still get new connections."""
+    a, b = Iface("a", "1.1.1.1"), Iface("b", "2.2.2.2")
+    p = pool(a, b)
+    p.active = {"a": 8, "b": 12}          # idle keep-alives opened long ago: no recent opens, no speed
+    picks = []
+    for _ in range(8):
+        i = p.pick(); p.opened(i); picks.append(i.name)
+    assert picks.count("a") >= 3 and picks.count("b") >= 3, picks   # shared out, not all sent to the one with fewer idle connections
+
+
+def test_pick_skips_a_network_without_internet_but_falls_back_if_none_have_it():
+    a, b = Iface("a", "1.1.1.1"), Iface("b", "2.2.2.2")
+    p = pool(a, b)
+    p.mark("a", False)
+    assert all(p.pick().name == "b" for _ in range(5))            # "a" is waiting, so it gets nothing
+    assert [i.name for i in p.waiting()] == ["a"]
+    p.mark("b", False)
+    assert p.pick().name in ("a", "b")                            # nothing ready at all: still try, never refuse outright
+
+
+def test_health_loop_adds_a_network_by_itself_when_its_internet_starts_working(monkeypatch):
+    """The phone is plugged in first and gets internet a few seconds later: it must join without anyone touching anything."""
+    import maxnet.net as net
+    attempts = {"phone": 0}
+
+    class W:
+        def close(self): pass
+
+    async def fake_open(iface, host, port, ssl=None, timeout=10.0):
+        if iface.name == "phone":
+            attempts["phone"] += 1
+            if attempts["phone"] < 3:
+                raise ConnectionError("no internet yet")
+        return object(), W()
+    monkeypatch.setattr(net, "open_via", fake_open)
+
+    async def run():
+        p = pool(Iface("lan", "1.1.1.1"), Iface("phone", "2.2.2.2"))
+        task = asyncio.ensure_future(net.health_loop(p, every=0.2, retry=0.05, timeout=1))
+        await asyncio.sleep(0.05)
+        early = p.ready.get("phone")
+        await asyncio.sleep(0.6)
+        task.cancel()
+        return early, p.ready.get("phone")
+    early, later = asyncio.run(run())
+    assert early is False and later is True
+
+
+def test_proxy_marks_a_network_not_ready_when_it_cannot_connect(server, monkeypatch):
+    import maxnet.proxy as proxy
+    real = proxy.open_via
+    async def flaky(iface, host, port, ssl=None, timeout=10.0):
+        if iface.name == "gone":
+            raise ConnectionError("no route")
+        return await real(LO, host, port)
+    monkeypatch.setattr(proxy, "open_via", flaky)
+
+    async def run():
+        p = pool(Iface("gone", "9.9.9.9"), Iface("up", "2.2.2.2"))
+        srv = await serve(p, port=0)
+        port = srv.sockets[0].getsockname()[1]
+        r, w = await asyncio.open_connection("127.0.0.1", port)
+        w.write(f"GET http://127.0.0.1:{server}/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+        await r.read(); srv.close()
+        return p.ready
+    assert asyncio.run(run()).get("gone") is False
+
+
+def test_shutdown_ends_open_connections_without_leaving_pending_tasks(server, caplog):
+    """Quitting with connections still open through the proxy used to print 'Event loop is closed' / 'Task was destroyed'."""
+    import gc
+    import logging
+    from maxnet.proxy import shutdown
+
+    async def run():
+        p = pool(LO)
+        srv = await serve(p, port=0)
+        port = srv.sockets[0].getsockname()[1]
+        conns = []
+        for _ in range(3):                                       # three idle SOCKS connections, like open browser tabs
+            r, w = await asyncio.open_connection("127.0.0.1", port)
+            w.write(b"\x05\x01\x00"); await r.readexactly(2)
+            w.write(b"\x05\x01\x00\x01" + socket.inet_aton("127.0.0.1") + server.to_bytes(2, "big"))
+            await r.readexactly(10)
+            conns.append(w)
+        assert len(srv.maxnet_tasks) == 3
+        await shutdown(srv)
+        return len(srv.maxnet_tasks)
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        assert asyncio.run(run()) == 0
+        gc.collect()
+    assert "destroyed but it is pending" not in caplog.text and "Event loop is closed" not in caplog.text

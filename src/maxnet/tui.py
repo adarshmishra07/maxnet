@@ -14,8 +14,8 @@ from .bench import bar, run_all, slow_warnings
 from .check import run_checks
 from .download import download, safe_filename, unique_path
 from .meta import Meta, mask_ip, probe_all, shared_lines
-from .net import DEFAULT_PORT, Pool, list_interfaces
-from .proxy import serve
+from .net import DEFAULT_PORT, Pool, health_loop, list_interfaces
+from .proxy import serve, shutdown
 
 PORT = DEFAULT_PORT
 BAR = 30
@@ -56,6 +56,7 @@ class MaxNet(App):
         self.auto_paused = False  # True while we turned ourselves OFF because every network disconnected
         self.owns_system_proxy = False  # only the instance that turned it ON may turn it OFF
         self._guard_busy = False
+        self.server = None
         self.unconfigured = []
         self.pending = None
         self.results = []
@@ -72,17 +73,22 @@ class MaxNet(App):
 
     async def on_mount(self):
         try:
-            await serve(self.pool, port=PORT)
+            self.server = await serve(self.pool, port=PORT)
             self.proxy_ok = True
             if self.system_proxy and self.pool.live():
                 self.owns_system_proxy = await asyncio.to_thread(sysproxy.enable, PORT)  # restored when you quit
         except OSError:
             self.say(f"Port {PORT} is already in use (is another maxnet open?). Dashboard works, but nothing is routed.", "red")
+        self.run_worker(health_loop(self.pool), group="health")  # waits for networks without internet and adds them when they work
         self.set_interval(1, self.tick)
         self.set_interval(60, self.refresh_meta)
         self.refresh_meta()
         self.show_menu()
         self.tick()
+
+    async def on_unmount(self):
+        if self.server:
+            await shutdown(self.server)  # end open proxied connections cleanly before the event loop closes
 
     # ---------- display ----------
     def say(self, msg, style="bold"):
@@ -116,6 +122,9 @@ class MaxNet(App):
         if self.auto_paused:
             st.append("⚠ PAUSED  ", style="bold #e5c07b")
             st.append("no selected network is connected. Your Mac uses its normal settings and maxnet turns back on when one returns.", style="dim")
+        elif syson and live and all(not self.pool.ready.get(i.name, True) for i in live):
+            st.append("◌ WAITING  ", style="bold #e5c07b")
+            st.append("no selected network has internet yet. maxnet joins automatically when one does.", style="dim")
         elif syson:
             st.append("● ON  ", style="bold green")
             st.append(f"apps follow your macOS proxy settings and use {len(live)} network{'s' if len(live) != 1 else ''} together   ")
@@ -132,7 +141,8 @@ class MaxNet(App):
             r = self.rate.get(i.name, 0) * 8 / 1e6
             out.append(f"{m.label or i.name}", style="bold")
             out.append(f"  ({i.name})  ", style="dim")
-            out.append("● in use" if on else "○ not in use", style=ACCENT if on else "dim")
+            waiting = on and not self.pool.ready.get(i.name, True)
+            out.append("◌ waiting for internet" if waiting else ("● in use" if on else "○ not in use"), style="#e5c07b" if waiting else (ACCENT if on else "dim"))
             n = self.pool.active.get(i.name, 0)
             out.append(f"   {n} open connection{'s' if n != 1 else ''}\n")
             out.append("  " + (bar(self.rate.get(i.name, 0) / self.peak, BAR) if on else "─" * BAR), style="green" if on else "dim")
@@ -180,6 +190,8 @@ class MaxNet(App):
     def detail(self, i, m):
         if m.reachable is None:
             return "checking connection…"
+        if not self.pool.ready.get(i.name, True) and i.name in self.pool.enabled:
+            return "Connected, but no internet yet. maxnet keeps checking and adds it automatically when it works."
         if not m.reachable:
             return "No internet on this network"
         bits = [f"ping {m.latency_ms:.0f} ms"]
