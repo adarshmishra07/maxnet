@@ -25,12 +25,22 @@ The same test shows up in the macOS network counters: without maxnet, one interf
 
 ## Install
 
+Easiest, works on a fresh Mac or Linux machine (needs only `curl`, no Python or uv):
+
 ```bash
-uv tool install maxnet        # or: pipx install maxnet
+curl -LsSf https://raw.githubusercontent.com/adarshmishra07/maxnet/main/install.sh | sh
 maxnet
 ```
 
-Until it is on PyPI: `uv tool install git+https://github.com/adarshmishra07/maxnet`.
+The script installs [uv](https://docs.astral.sh/uv/) if you do not have it (uv brings its own Python), then installs maxnet. Read it first at [install.sh](install.sh) if you like.
+
+Already have uv or pipx:
+
+```bash
+uv tool install https://github.com/adarshmishra07/maxnet/archive/refs/heads/main.tar.gz
+```
+
+PyPI (`uvx maxnet`, `pipx install maxnet`) is coming.
 
 ## Use
 
