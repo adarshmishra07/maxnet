@@ -124,6 +124,11 @@ maxnet is free software provided "as is", without warranty of any kind (see [LIC
 - Nothing else leaves your machine, and there is no telemetry.
 - Found a security problem? Please use GitHub's private vulnerability reporting on this repo instead of a public issue.
 
+## Credits
+
+- The idea of splitting one download across several networks with HTTP Range requests comes from [Plexo](https://github.com/anmolkapil/plexo) by anmolkapil, a desktop download manager. maxnet applies it to the whole machine through a local proxy, in a terminal. If you want a polished app for downloads and torrents, use Plexo.
+- Android over USB on macOS works thanks to [TetherKit](https://github.com/XiaoMiku01/TetherKit).
+
 ## Code map
 
 ```
