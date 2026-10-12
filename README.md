@@ -16,14 +16,16 @@ iPhone USB  (en9)  ● in use   5 open connections
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  168.0 Mbit/s   2,980 MB so far
 ```
 
-## Measured result (one machine, one run, not a promise)
+## Measured results (one machine, one run each, not a promise)
 
-| Setup | Speed |
-|---|---|
-| Browser on one connection (fast.com) | 140 Mbit/s |
-| Same browser through maxnet, 3 connections (Wi-Fi, USB LAN, iPhone) | 340 Mbit/s |
+fast.com in Chrome, same Mac, same test:
 
-The same test shows up in the macOS network counters: without maxnet, one interface carries everything; with maxnet, all three do. Your result depends on your connections, your router and the server you download from. Run `maxnet test` to measure your own.
+| Networks used | Without maxnet | With maxnet |
+|---|---|---|
+| USB LAN + iPhone over USB, Wi-Fi off (the demo video) | 150 Mbit/s | 280 Mbit/s |
+| Wi-Fi + USB LAN + iPhone over USB (an earlier run) | 140 Mbit/s | 340 Mbit/s |
+
+The macOS network counters agree: without maxnet one interface carries everything; with maxnet every selected network does. Your result depends on your connections, your router and the server you download from. Wi-Fi and a USB LAN adapter on one router share one line, so a phone on its own SIM adds the most. Run `maxnet test` to measure your own.
 
 ## Install
 
