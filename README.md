@@ -4,6 +4,10 @@ Use every internet connection on your machine at the same time.
 
 Plug in your phone over USB, keep Wi-Fi on, and maxnet spreads your traffic across all of them from one terminal screen. It needs no extra hardware, VPN, server or root access.
 
+![maxnet demo: fast.com goes from 150 Mbps without maxnet to 280 Mbps with it](docs/maxnet-before-after.gif)
+
+*Same Mac, same fast.com test, one run each, with a USB LAN adapter and an iPhone over USB (Wi-Fi off). [Watch the full-quality video](docs/maxnet-before-after.mp4).*
+
 *Example layout with made-up numbers. Real measurements are in the next section.*
 
 ```
