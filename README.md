@@ -80,7 +80,7 @@ eval "$(maxnet env)"           # terminal tools (git, curl, npm) use it too
 
 ## How it works
 
-Your OS sends all traffic out one default connection and leaves the others idle. maxnet runs a local proxy on `127.0.0.1:1080`. For every new connection the proxy picks the network with the fewest open connections and opens the socket pinned to that network (`IP_BOUND_IF` on macOS, `SO_BINDTODEVICE` on Linux). More connections means more networks working at once.
+Your OS sends all traffic out one default connection and leaves the others idle. maxnet runs a local proxy on `127.0.0.1:1080`. For every new connection the proxy picks the network with the most spare capacity (fewest open connections relative to how fast that network has actually been) and opens the socket pinned to it (`IP_BOUND_IF` on macOS, `SO_BINDTODEVICE` on Linux). A throttled or weak network gets few connections, so it cannot drag the others down. More connections means more networks working at once.
 
 For single big files, `maxnet dl` splits the file into 8 MB blocks with HTTP Range requests and fetches them over every network in parallel, so one download gets the combined speed. The idea comes from [Plexo](https://github.com/anmolkapil/plexo).
 
