@@ -29,9 +29,13 @@ class Meta:
     is_default: bool = False
 
 
+SYSTEM_PATH = "/usr/sbin:/sbin:/usr/bin:/bin"  # networksetup, route and ip live here even when PATH is minimal
+
+
 def _run(cmd):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+        env = {**os.environ, "PATH": f"{os.environ.get('PATH', '')}:{SYSTEM_PATH}"}
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5, env=env).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 

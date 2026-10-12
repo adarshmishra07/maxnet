@@ -99,6 +99,18 @@ Windows is not supported.
 - IPv4 only. `maxnet dl` needs servers that support Range requests and cannot resume yet.
 - Real multi-network speedups for every app, including single streams, need a server you run that merges the connections. maxnet does not do that.
 
+## Disclaimer
+
+maxnet is free software provided "as is", without warranty of any kind (see [LICENSE](LICENSE)). You use it at your own risk.
+
+- **Data and costs.** maxnet sends real traffic over every network you turn on. The speed test (`maxnet test`) downloads hundreds of megabytes per network, and `maxnet dl` downloads whole files. On a phone hotspot or any metered or capped plan this uses your mobile data and can cost money. Turn off networks you do not want charged.
+- **Provider terms.** Tethering, hotspot sharing and combining connections may be limited or prohibited by your ISP, mobile carrier, employer or school. Check your terms first. You are responsible for how you use maxnet.
+- **Your settings.** Turning ON changes your macOS system proxy. maxnet saves and restores your original settings, but if anything goes wrong run `maxnet system off`. Do not use maxnet on machines where you are not allowed to change network settings.
+- **Not a VPN.** maxnet does not encrypt, hide or anonymize your traffic. It only chooses which network each connection leaves through. The local proxy listens on `127.0.0.1` only.
+- **Speeds are not guaranteed.** The numbers in this README were measured once on one setup. Your results depend on your networks, router, ISP and the server you download from, and can be no faster than a single connection.
+- **Downloads.** You are responsible for what you download and for having the right to download it.
+- **Independent project.** maxnet is not affiliated with or endorsed by Plexo, Apple, Google, Cloudflare or any other product or company named here. Names belong to their owners.
+
 ## Safety and privacy
 
 - Turning ON changes your macOS system proxy. Original settings are saved to the config file and restored on OFF, on quit, and by `maxnet system off` if maxnet is killed.

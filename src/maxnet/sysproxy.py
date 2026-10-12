@@ -13,7 +13,7 @@ SUPPORTED = sys.platform == "darwin"
 
 def _run(args):
     try:
-        return subprocess.run(["networksetup", *args], capture_output=True, text=True, timeout=10).stdout
+        return subprocess.run(["/usr/sbin/networksetup", *args], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
