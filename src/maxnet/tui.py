@@ -1,3 +1,4 @@
+import os
 import signal
 import time
 from pathlib import Path
@@ -371,7 +372,12 @@ class MaxNet(App):
 def run(system_proxy=True):
     def bye(signum, _frame):  # terminal window closed (SIGHUP) or process terminated (SIGTERM): restore settings first
         sysproxy.disable()
-        raise SystemExit(128 + signum)
+        try:  # leave the user's terminal usable: normal screen, cursor back, mouse reporting off
+            os.set_blocking(1, False)  # never let a wedged terminal trap the exit
+            os.write(1, b"\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[0m")
+        except OSError:
+            pass  # the terminal is already gone (SIGHUP)
+        os._exit(128 + signum)  # exiting by exception can be swallowed by the running event loop, so exit for certain
     for sig in (signal.SIGHUP, signal.SIGTERM):
         signal.signal(sig, bye)
     try:
