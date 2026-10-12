@@ -4,6 +4,8 @@ Use every internet connection on your machine at the same time.
 
 Plug in your phone over USB, keep Wi-Fi on, and maxnet spreads your traffic across all of them from one terminal screen. No hardware, no VPN, no server, no root.
 
+*Illustrative layout, the numbers below are made up. See the measured result next.*
+
 ```
 ● ON  apps follow your macOS proxy settings and use 3 networks together   312.4 Mbit/s now
 
@@ -50,7 +52,8 @@ Run `maxnet`. It turns itself ON when it starts and asks before turning OFF when
 |---|---|
 | `o` | turn ON / OFF |
 | `i` | show / hide public IPs (hidden by default) |
-| `q` | quit (restores your proxy settings) |
+| `Esc` | go back |
+| `q` | quit (asks first, then restores your proxy settings) |
 
 From the menu you can run a speed test (each network alone, then together), download a file over all networks, choose which networks to use, and choose which apps use maxnet.
 
@@ -77,6 +80,16 @@ For single big files, `maxnet dl` splits the file into 8 MB blocks with HTTP Ran
 
 On macOS, turning ON also points the system SOCKS proxy at maxnet, so apps that follow system proxy settings use it automatically. Your original settings are saved first and restored when you turn OFF or quit.
 
+## Platform support
+
+| | macOS | Linux |
+|---|---|---|
+| Local proxy, speed test, `maxnet dl`, TUI | yes | yes |
+| System-wide ON/OFF (system proxy) | yes | not yet (use `eval "$(maxnet env)"` or point apps at `socks5h://127.0.0.1:1080`) |
+| Attach apps (launch with proxy flag) | yes | not yet |
+
+Windows is not supported.
+
 ## Limits (read these)
 
 - **One connection stays on one network.** The speedup comes from many connections at once, which browsers and downloaders do. A single plain stream is not faster.
@@ -91,6 +104,7 @@ On macOS, turning ON also points the system SOCKS proxy at maxnet, so apps that 
 - Turning ON changes your macOS system proxy. Original settings are saved to the config file and restored on OFF, on quit, and by `maxnet system off` if maxnet is killed.
 - `maxnet` looks up your public IP and ISP through ip-api.com (over plain HTTP, once a minute) to show line info and detect shared lines. Set `MAXNET_NO_LOOKUP=1` to skip it.
 - Everything else stays on your machine. No telemetry.
+- Found a security problem? Please use GitHub's private vulnerability reporting on this repo instead of a public issue.
 
 ## Code map
 
