@@ -61,7 +61,7 @@ Run `maxnet`. It turns itself ON when it starts and asks before turning OFF when
 | `Esc` | go back |
 | `q` | quit (asks first, then restores your proxy settings) |
 
-From the menu you can run a speed test (each network alone, then together), download a file over all networks, choose which networks to use, and choose which apps use maxnet.
+From the menu you can check that everything works, run a speed test (each network alone, then together), download a file over all networks, choose which networks to use, choose which apps use maxnet, and set up a network port macOS has not configured yet (for example a phone you just plugged in). Everything happens inside the terminal screen.
 
 Command line, if you prefer:
 

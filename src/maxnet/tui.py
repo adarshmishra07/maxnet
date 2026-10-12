@@ -6,8 +6,9 @@ from textual.app import App, ComposeResult
 from textual.widgets import Footer, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from . import apps, sysproxy
+from . import apps, netsetup, sysproxy
 from .bench import bar, run_all
+from .check import run_checks
 from .download import download, safe_filename
 from .meta import Meta, mask_ip, probe_all, shared_lines
 from .net import Pool, list_interfaces
@@ -22,6 +23,8 @@ HELP = {
     "apps": "Enter attaches/detaches · takes effect the next time the app starts · Esc back",
     "dl": "Paste a link and press Enter · Esc cancel",
     "quit": "Enter to confirm",
+    "setup": "Enter picks a port to set up · Esc back",
+    "confirm": "Enter to confirm · Esc cancel",
 }
 
 
@@ -48,6 +51,7 @@ class MaxNet(App):
         self.show_ip = False
         self.proxy_ok = False
         self.auto_paused = False  # True while we turned ourselves OFF because every network disconnected
+        self.pending = None
         self.results = []
         self.metas, self.tests = {}, {}
 
@@ -125,6 +129,9 @@ class MaxNet(App):
             out.append("  " + self.detail(i, m) + "\n", style="dim")
         for g in shared_lines(self.pool.enabled, self.metas):
             out.append(f"\nNote: {' and '.join(g)} share one internet line (same public IP). The gain depends on your router, so try the speed test.\n", style="#e5c07b")
+        new = netsetup.unconfigured()
+        if new:
+            out.append(f"\nFound a network port macOS has not set up ({', '.join(new)}). Choose 'Set up new network port' in the menu.\n", style="#e5c07b")
         if not ifaces:
             out.append("No networks found. Connect Wi-Fi, Ethernet, or a phone over USB.")
         elif len(live) < 2:
@@ -171,7 +178,10 @@ class MaxNet(App):
 
     def show_menu(self):
         sysword = "Turn OFF (back to your normal connection)" if sysproxy.active() else "Turn ON"
-        self.fill("menu", [
+        new = netsetup.unconfigured()
+        extra = [("setup", f"Set up {len(new)} new network port{'s' if len(new) != 1 else ''} (phone just plugged in?)")] if new else []
+        self.fill("menu", extra + [
+            ("check", "Check that everything works"),
             ("test", "Speed test: each network, then all together"),
             ("dl", "Download a file using all networks"),
             ("nets", "Choose which networks to use"),
@@ -179,6 +189,27 @@ class MaxNet(App):
             ("sys", sysword),
             ("quit", "Quit"),
         ])
+
+    def show_setup(self):
+        self.fill("setup", [(n, f"{n} has no address yet") for n in netsetup.unconfigured()] + [("back", "← Back")])
+
+    def start_check(self):
+        if self.busy:
+            return self.say("Something is already running.")
+        self.busy = True
+        self.say("Checking…")
+        self.run_worker(self.check_worker(), exclusive=True)
+
+    async def check_worker(self):
+        try:
+            rows = await run_checks(self.pool, PORT, sysproxy.active(), True if self.system_proxy and self.proxy_ok else None)
+            out = Text("Check results\n", style="bold")
+            for ok, msg in rows:
+                out.append(("✓ " if ok else "✗ "), style="bold green" if ok else "bold red")
+                out.append(msg + "\n")
+            self.query_one("#notice", Static).update(out)
+        finally:
+            self.busy = False
 
     def show_nets(self):
         items = []
@@ -198,8 +229,16 @@ class MaxNet(App):
         if key == "back":
             return self.show_menu()
         if self.mode == "menu":
-            return {"test": self.start_test, "dl": self.ask_url, "nets": self.show_nets, "apps": self.show_apps,
+            return {"setup": self.show_setup, "check": self.start_check, "test": self.start_test, "dl": self.ask_url, "nets": self.show_nets, "apps": self.show_apps,
                     "sys": self.toggle_sys, "quit": self.action_ask_quit}[key]()
+        if self.mode == "setup":
+            self.pending = key
+            return self.fill("confirm", [("yes", f"Yes: create a macOS network service for {key} (changes Network settings)"), ("back", "← Cancel")])
+        if self.mode == "confirm":
+            if key == "yes":
+                name = netsetup.setup(self.pending)
+                self.say(f"Created network service '{name}' with DHCP. It should get an address in a few seconds.", "bold green")
+            return self.show_menu()
         if self.mode == "nets":
             self.pool.toggle(key)
             self.tick()

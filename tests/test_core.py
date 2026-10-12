@@ -312,3 +312,51 @@ def test_tui_pauses_system_proxy_when_all_networks_drop_and_resumes(monkeypatch)
             app.tick(); await pilot.pause(0.1)
             assert state["on"] is True and app.auto_paused is False
     asyncio.run(run())
+
+
+def test_netsetup_finds_only_link_local_ports_without_a_service(monkeypatch):
+    import maxnet.netsetup as ns
+    from collections import namedtuple
+    A = namedtuple("A", "family address")
+    S = namedtuple("S", "isup")
+    monkeypatch.setattr(ns, "SUPPORTED", True)
+    monkeypatch.setattr(ns, "labels", lambda: {"en0": "Wi-Fi"})
+    monkeypatch.setattr(ns.psutil, "net_if_addrs", lambda: {
+        "en0": [A(socket.AF_INET, "169.254.1.1")],     # has a service already: skip
+        "en11": [A(socket.AF_INET, "169.254.12.91")],  # new phone, no service: report
+        "en12": [A(socket.AF_INET, "192.168.1.5")],    # real address: skip
+        "utun3": [A(socket.AF_INET, "169.254.9.9")],   # virtual: skip
+        "en13": [A(socket.AF_INET, "169.254.7.7")],    # down: skip
+    })
+    monkeypatch.setattr(ns.psutil, "net_if_stats", lambda: {n: S(n != "en13") for n in ["en0", "en11", "en12", "utun3", "en13"]})
+    assert ns.unconfigured() == ["en11"]
+
+
+def test_netsetup_creates_service_then_enables_dhcp(monkeypatch):
+    import maxnet.netsetup as ns
+    calls = []
+    monkeypatch.setattr(ns, "_run", lambda a: calls.append(a) or "")
+    assert ns.setup("en11") == "maxnet en11"
+    assert calls == [["-createnetworkservice", "maxnet en11", "en11"], ["-setdhcp", "maxnet en11"]]
+
+
+def test_health_check_reports_real_proxy_path(server):
+    from maxnet.check import run_checks
+
+    async def run():
+        p = pool(LO)
+        srv = await serve(p, port=0)
+        port = srv.sockets[0].getsockname()[1]
+        # the checker fetches example.com through the proxy; here "example.com" is the local test server
+        import maxnet.check as chk
+        async def fake_via(port_, host="x"):
+            r, w = await asyncio.open_connection("127.0.0.1", port_)
+            w.write(f"GET http://127.0.0.1:{server}/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+            body = await r.read(); w.close()
+            return len(body) > 0
+        chk._via_proxy = fake_via
+        rows = await run_checks(p, port, False, None)
+        srv.close()
+        return rows
+    rows = asyncio.run(run())
+    assert any("through the maxnet proxy worked" in t and ok for ok, t in rows)
