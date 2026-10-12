@@ -1,0 +1,33 @@
+[project]
+name = "maxnet"
+version = "0.1.0"
+description = "Terminal UI that bonds every internet connection on your machine through a local proxy and a multi-network downloader."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Adarsh Mishra" }]
+keywords = ["bandwidth", "multi-wan", "load-balancing", "tui", "proxy", "download-manager"]
+classifiers = [
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Internet",
+]
+requires-python = ">=3.10"
+dependencies = ["psutil>=5.9", "textual>=0.80", "truststore>=0.9"]
+
+[project.urls]
+Homepage = "https://github.com/adarshmishra07/maxnet"
+
+[project.scripts]
+maxnet = "maxnet.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/maxnet"]
