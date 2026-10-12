@@ -2,9 +2,9 @@
 
 Use every internet connection on your machine at the same time.
 
-Plug in your phone over USB, keep Wi-Fi on, and maxnet spreads your traffic across all of them from one terminal screen. No hardware, no VPN, no server, no root.
+Plug in your phone over USB, keep Wi-Fi on, and maxnet spreads your traffic across all of them from one terminal screen. It needs no extra hardware, VPN, server or root access.
 
-*Illustrative layout, the numbers below are made up. See the measured result next.*
+*Example layout with made-up numbers. Real measurements are in the next section.*
 
 ```
 ● ON  apps follow your macOS proxy settings and use 3 networks together   312.4 Mbit/s now
@@ -27,7 +27,7 @@ The same test shows up in the macOS network counters: without maxnet, one interf
 
 ## Install
 
-Easiest, works on a fresh Mac or Linux machine (needs only `curl`, no Python or uv):
+The easiest way on a fresh Mac or Linux machine needs only `curl`, no Python or uv:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/adarshmishra07/maxnet/main/install.sh | sh
@@ -115,7 +115,7 @@ maxnet is free software provided "as is", without warranty of any kind (see [LIC
 
 - Turning ON changes your macOS system proxy. Original settings are saved to the config file and restored on OFF, on quit, and by `maxnet system off` if maxnet is killed.
 - `maxnet` looks up your public IP and ISP through ip-api.com (over plain HTTP, once a minute) to show line info and detect shared lines. Set `MAXNET_NO_LOOKUP=1` to skip it.
-- Everything else stays on your machine. No telemetry.
+- Nothing else leaves your machine, and there is no telemetry.
 - Found a security problem? Please use GitHub's private vulnerability reporting on this repo instead of a public issue.
 
 ## Code map
