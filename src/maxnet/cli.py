@@ -50,7 +50,10 @@ def _apps(a):
             print(f"{'*' if n in on else ' '} {n}")
         print("\nShell tools: add  eval \"$(maxnet env)\"  to ~/.zshrc (only active while maxnet runs)")
     elif a.cmd == "open":
-        for n in a.names or apps.attached():
+        names = a.names or apps.attached()
+        if not a.names and len(names) > 3 and input(f"Start {len(names)} apps through maxnet? [y/N] ").strip().lower() != "y":
+            return
+        for n in names:
             print(apps.launch(n, port))
     else:
         if a.name not in apps.installed():

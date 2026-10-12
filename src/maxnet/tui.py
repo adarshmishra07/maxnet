@@ -232,12 +232,15 @@ class MaxNet(App):
             return {"setup": self.show_setup, "check": self.start_check, "test": self.start_test, "dl": self.ask_url, "nets": self.show_nets, "apps": self.show_apps,
                     "sys": self.toggle_sys, "quit": self.action_ask_quit}[key]()
         if self.mode == "setup":
-            self.pending = key
+            self.pending = ("setup", key)
             return self.fill("confirm", [("yes", f"Yes: create a macOS network service for {key} (changes Network settings)"), ("back", "← Cancel")])
         if self.mode == "confirm":
-            if key == "yes":
-                name = netsetup.setup(self.pending)
+            kind, arg = self.pending
+            if key == "yes" and kind == "setup":
+                name = netsetup.setup(arg)
                 self.say(f"Created network service '{name}' with DHCP. It should get an address in a few seconds.", "bold green")
+            elif key == "yes" and kind == "launch":
+                self.say("\n".join(apps.launch(n, PORT) for n in arg))
             return self.show_menu()
         if self.mode == "nets":
             self.pool.toggle(key)
@@ -245,9 +248,9 @@ class MaxNet(App):
             return self.show_nets()
         if self.mode == "apps":
             if key == "launch":
-                for n in apps.attached():
-                    self.say(apps.launch(n, PORT))
-                return
+                names = apps.attached()
+                self.pending = ("launch", names)
+                return self.fill("confirm", [("yes", f"Yes: start {len(names)} app{'s' if len(names) != 1 else ''} through maxnet now"), ("back", "← Cancel")])
             apps.toggle(key)
             return self.show_apps()
         if self.mode == "quit":

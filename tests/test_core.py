@@ -360,3 +360,22 @@ def test_health_check_reports_real_proxy_path(server):
         return rows
     rows = asyncio.run(run())
     assert any("through the maxnet proxy worked" in t and ok for ok, t in rows)
+
+
+def test_apps_autodetects_chromium_and_electron_and_attaches_all_by_default(monkeypatch, tmp_path):
+    import maxnet.apps as apps
+    def make(name, framework):
+        d = tmp_path / f"{name}.app" / "Contents" / "Frameworks" / framework
+        d.mkdir(parents=True)
+    make("Slack", "Electron Framework.framework")                 # Electron
+    make("Spotify", "Chromium Embedded Framework.framework")      # CEF
+    make("Google Chrome", "Google Chrome Framework.framework")    # Chrome style
+    make("Safari", "WebKit.framework")                            # not Chromium: must be ignored
+    (tmp_path / "Notes.app" / "Contents").mkdir(parents=True)     # no frameworks at all
+    monkeypatch.setattr(apps, "DIRS", [tmp_path])
+    assert apps.installed() == ["Google Chrome", "Slack", "Spotify"]
+    assert apps.attached() == ["Google Chrome", "Slack", "Spotify"]      # all attached by default
+    apps.toggle("Slack")
+    assert apps.attached() == ["Google Chrome", "Spotify"]               # detach one
+    apps.toggle("Slack")
+    assert "Slack" in apps.attached()                                    # and re-attach

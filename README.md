@@ -99,7 +99,7 @@ Windows is not supported.
 ## Limits (read these)
 
 - **One connection stays on one network.** The speedup comes from many connections at once, which browsers and downloaders do. A single plain stream is not faster.
-- **Not every app uses the proxy.** Apps that ignore system proxy settings keep using your normal connection. Supported Chromium apps (Chrome, Brave, Edge, Arc, Slack, Discord, VS Code and more) are all attached by default and are launched with a proxy flag; restart them once to pick it up, and detach any you do not want. Safari and Firefox follow system settings only.
+- **Not every app uses the proxy.** Apps that ignore system proxy settings keep using your normal connection. maxnet finds every Chromium-based and Electron app in your Applications folders (Chrome, Brave, Edge, Arc, Slack, Discord, VS Code, Cursor, Figma and more) and attaches them all by default, including ones you install later. Attached apps are launched with a proxy flag, so start them from maxnet once; detach any you do not want. With the system proxy ON, most apps are covered without attaching anything. Safari and Firefox follow system settings only.
 - **Your networks must reach the internet separately.** Wi-Fi plus Ethernet on one router share one line, though some routers still give each device its own limit. Check with the speed test. A phone over USB is a separate line.
 - **Android over USB on macOS** needs a driver ([TetherKit](https://github.com/XiaoMiku01/TetherKit)); iPhone works out of the box.
 - IPv4 only. `maxnet dl` needs servers that support Range requests and cannot resume yet.

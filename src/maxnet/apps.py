@@ -10,23 +10,34 @@ import psutil
 
 from .net import load_config, update_config
 
-CHROMIUM = ["Google Chrome", "Brave Browser", "Microsoft Edge", "Arc", "Vivaldi",
-            "Slack", "Discord", "Visual Studio Code", "Claude", "Notion"]
-DEFAULT_ON = CHROMIUM  # everything supported is attached by default; detach what you do not want
 DIRS = [Path("/Applications"), Path.home() / "Applications"]
+MARKERS = ("Electron Framework.framework", "Chromium Embedded Framework.framework")
+
+
+def _is_chromium(app):
+    """Chromium-based apps (Chrome, Brave, Edge, Arc, Electron apps) accept --proxy-server."""
+    frameworks = app / "Contents" / "Frameworks"
+    return any((frameworks / m).exists() for m in MARKERS) or (frameworks / f"{app.stem} Framework.framework").exists()
 
 
 def installed():
-    return [n for n in CHROMIUM if any((d / f"{n}.app").exists() for d in DIRS)]
+    """Every Chromium-based or Electron app found in the Applications folders."""
+    found = set()
+    for d in DIRS:
+        if d.is_dir():
+            found |= {a.stem for a in d.glob("*.app") if _is_chromium(a)}
+    return sorted(found)
 
 
 def attached():
-    chosen = load_config().get("attached", DEFAULT_ON)
-    return [n for n in installed() if n in chosen]
+    """Everything found is attached by default; the user detaches what they do not want."""
+    detached = set(load_config().get("detached", []))
+    return [n for n in installed() if n not in detached]
 
 
 def toggle(name):
-    update_config(attached=sorted(set(attached()) ^ {name}))
+    detached = set(load_config().get("detached", []))
+    update_config(detached=sorted(detached ^ {name}))
 
 
 def running(name):
